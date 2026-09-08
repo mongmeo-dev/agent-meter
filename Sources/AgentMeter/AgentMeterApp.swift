@@ -1,20 +1,37 @@
 import AgentMeterCore
 import AppKit
+import Sparkle
 import SwiftUI
 
 @main
 @MainActor
 struct AgentMeterApp: App {
   @StateObject private var model = AgentMeterModel()
+  private let updaterController: SPUStandardUpdaterController
+
+  init() {
+    updaterController = SPUStandardUpdaterController(
+      startingUpdater: true,
+      updaterDelegate: nil,
+      userDriverDelegate: nil
+    )
+  }
 
   var body: some Scene {
     MenuBarExtra {
-      AgentMeterMenu(model: model)
+      AgentMeterMenu(model: model, updater: updaterController.updater)
     } label: {
       Image(nsImage: model.menuBarImage)
         .accessibilityLabel(Text(model.menuBarAccessibilityLabel))
     }
     .menuBarExtraStyle(.window)
+    .commands {
+      CommandGroup(after: .appInfo) {
+        Button("업데이트 확인…") {
+          updaterController.updater.checkForUpdates()
+        }
+      }
+    }
   }
 }
 
@@ -550,6 +567,7 @@ private enum MenuBarLabelRenderer {
 @MainActor
 private struct AgentMeterMenu: View {
   @ObservedObject var model: AgentMeterModel
+  let updater: SPUUpdater
 
   var body: some View {
     ScrollView(.vertical) {
@@ -593,6 +611,10 @@ private struct AgentMeterMenu: View {
           NSApplication.shared.terminate(nil)
         }
       }
+      Button("업데이트 확인…") {
+        updater.checkForUpdates()
+      }
+      UpdaterSettingsView(updater: updater)
     }
   }
 
@@ -616,6 +638,10 @@ private struct AgentMeterMenu: View {
           NSApplication.shared.terminate(nil)
         }
       }
+      Button("업데이트 확인…") {
+        updater.checkForUpdates()
+      }
+      UpdaterSettingsView(updater: updater)
       Picker(
         "자동 새로 고침",
         selection: Binding(
@@ -657,6 +683,37 @@ private struct AgentMeterMenu: View {
           .foregroundStyle(.secondary)
       }
       .padding(.top, 4)
+    }
+  }
+}
+
+@MainActor
+private struct UpdaterSettingsView: View {
+  let updater: SPUUpdater
+  @State private var automaticallyChecksForUpdates: Bool
+  @State private var automaticallyDownloadsUpdates: Bool
+
+  init(updater: SPUUpdater) {
+    self.updater = updater
+    _automaticallyChecksForUpdates = State(
+      initialValue: updater.automaticallyChecksForUpdates
+    )
+    _automaticallyDownloadsUpdates = State(
+      initialValue: updater.automaticallyDownloadsUpdates
+    )
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Toggle("업데이트 자동 확인", isOn: $automaticallyChecksForUpdates)
+        .onChange(of: automaticallyChecksForUpdates) { _, enabled in
+          updater.automaticallyChecksForUpdates = enabled
+        }
+      Toggle("업데이트 자동 다운로드 및 설치", isOn: $automaticallyDownloadsUpdates)
+        .disabled(!automaticallyChecksForUpdates)
+        .onChange(of: automaticallyDownloadsUpdates) { _, enabled in
+          updater.automaticallyDownloadsUpdates = enabled
+        }
     }
   }
 }

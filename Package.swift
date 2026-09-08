@@ -10,11 +10,20 @@ let package = Package(
     .library(name: "AgentMeterCore", targets: ["AgentMeterCore"]),
     .executable(name: "AgentMeter", targets: ["AgentMeter"]),
   ],
+  dependencies: [
+    .package(
+      url: "https://github.com/sparkle-project/Sparkle",
+      exact: "2.9.6"
+    )
+  ],
   targets: [
     .target(name: "AgentMeterCore"),
     .executableTarget(
       name: "AgentMeter",
-      dependencies: ["AgentMeterCore"],
+      dependencies: [
+        "AgentMeterCore",
+        .product(name: "Sparkle", package: "sparkle"),
+      ],
       resources: [.process("Resources")]
     ),
     .testTarget(name: "AgentMeterCoreTests", dependencies: ["AgentMeterCore"]),
