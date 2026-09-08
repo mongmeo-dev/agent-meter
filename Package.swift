@@ -12,7 +12,11 @@ let package = Package(
   ],
   targets: [
     .target(name: "AgentMeterCore"),
-    .executableTarget(name: "AgentMeter", dependencies: ["AgentMeterCore"]),
+    .executableTarget(
+      name: "AgentMeter",
+      dependencies: ["AgentMeterCore"],
+      resources: [.process("Resources")]
+    ),
     .testTarget(name: "AgentMeterCoreTests", dependencies: ["AgentMeterCore"]),
   ]
 )

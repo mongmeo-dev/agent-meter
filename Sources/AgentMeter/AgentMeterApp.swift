@@ -11,8 +11,8 @@ struct AgentMeterApp: App {
     MenuBarExtra {
       AgentMeterMenu(model: model)
     } label: {
-      Text(model.menuBarLabel)
-        .monospacedDigit()
+      Image(nsImage: model.menuBarImage)
+        .accessibilityLabel(Text(model.menuBarAccessibilityLabel))
     }
     .menuBarExtraStyle(.window)
   }
@@ -27,12 +27,16 @@ private final class AgentMeterModel: ObservableObject {
   private var automaticTask: Task<Void, Never>?
 
   @Published private(set) var consentGranted: Bool
+  @Published private(set) var refreshInterval: RefreshInterval
+  @Published private(set) var menuBarAppearance: MenuBarAppearance
   @Published private(set) var states: [Provider: ProviderState]
 
   init() {
     self.service = UsageService()
     let granted = UserDefaults.standard.bool(forKey: Self.consentKey)
     self.consentGranted = granted
+    self.refreshInterval = RefreshInterval.load()
+    self.menuBarAppearance = MenuBarAppearance.load()
     self.states = Dictionary(
       uniqueKeysWithValues: Provider.allCases.map {
         ($0, ProviderState(provider: $0, phase: granted ? .loading : .awaitingConsent))
@@ -42,7 +46,7 @@ private final class AgentMeterModel: ObservableObject {
       Task { [weak self] in
         guard let self else { return }
         await self.service.setConsent(true)
-        self.startAutomaticRefresh()
+        self.restartAutomaticRefresh()
         self.refreshAll()
       }
     }
@@ -50,11 +54,210 @@ private final class AgentMeterModel: ObservableObject {
 
   var isRefreshing: Bool { !refreshTasks.isEmpty }
 
-  var menuBarLabel: String {
-    guard consentGranted else { return "Agent Meter" }
-    return Provider.allCases.map { summary(for: $0) }.joined(separator: " · ")
+  func setRefreshInterval(_ interval: RefreshInterval) {
+    guard refreshInterval != interval else { return }
+    refreshInterval = interval
+    interval.save()
+    restartAutomaticRefresh()
   }
 
+  func setMenuBarDisplayMode(_ mode: MenuBarDisplayMode, for provider: Provider) {
+    var appearance = menuBarAppearance
+    appearance.setMode(mode, for: provider)
+    guard appearance != menuBarAppearance else { return }
+    menuBarAppearance = appearance
+    appearance.save()
+  }
+
+  func setMenuBarCustomLabel(_ label: String, for provider: Provider) {
+    var appearance = menuBarAppearance
+    appearance.setCustomLabel(label, for: provider)
+    guard appearance != menuBarAppearance else { return }
+    menuBarAppearance = appearance
+    appearance.save()
+  }
+
+  func isMenuBarWindowSelected(_ windowID: String, for provider: Provider) -> Bool {
+    guard let usage = states[provider]?.usage else { return false }
+    return
+      menuBarAppearance
+      .settings(for: provider)
+      .selectedWindowIDs(for: usage)
+      .contains(windowID)
+  }
+
+  func setMenuBarWindowSelected(
+    _ selected: Bool,
+    windowID: String,
+    for provider: Provider
+  ) {
+    var appearance = menuBarAppearance
+    var settings = appearance.settings(for: provider)
+    var selectedIDs = settings.selectedWindowIDs(for: states[provider]?.usage)
+    if selected {
+      selectedIDs.insert(windowID)
+    } else {
+      selectedIDs.remove(windowID)
+    }
+    settings.setSelectedWindowIDs(selectedIDs)
+    appearance.set(settings, for: provider)
+    guard appearance != menuBarAppearance else { return }
+    menuBarAppearance = appearance
+    appearance.save()
+  }
+
+  func menuBarWindowLabelMode(
+    for windowID: String,
+    provider: Provider
+  ) -> MenuBarWindowLabelMode {
+    menuBarAppearance.settings(for: provider).settings(for: windowID).mode
+  }
+
+  func setMenuBarWindowLabelMode(
+    _ mode: MenuBarWindowLabelMode,
+    for windowID: String,
+    provider: Provider
+  ) {
+    var appearance = menuBarAppearance
+    var settings = appearance.settings(for: provider)
+    settings.setWindowLabelMode(mode, for: windowID)
+    appearance.set(settings, for: provider)
+    guard appearance != menuBarAppearance else { return }
+    menuBarAppearance = appearance
+    appearance.save()
+  }
+
+  func menuBarWindowCustomLabel(
+    for windowID: String,
+    provider: Provider
+  ) -> String {
+    menuBarAppearance.settings(for: provider).settings(for: windowID).customLabel
+  }
+
+  func setMenuBarWindowCustomLabel(
+    _ label: String,
+    for windowID: String,
+    provider: Provider
+  ) {
+    var appearance = menuBarAppearance
+    var settings = appearance.settings(for: provider)
+    settings.setWindowCustomLabel(label, for: windowID)
+    appearance.set(settings, for: provider)
+    guard appearance != menuBarAppearance else { return }
+    menuBarAppearance = appearance
+    appearance.save()
+  }
+
+  var menuBarImage: NSImage {
+    guard consentGranted else {
+      return MenuBarLabelRenderer.image(text: "Agent Meter")
+    }
+    return MenuBarLabelRenderer.image(for: menuBarSegments)
+  }
+
+  var menuBarAccessibilityLabel: String {
+    guard consentGranted else { return "Agent Meter" }
+    return Provider.allCases
+      .map { provider in menuBarAccessibility(for: provider) }
+      .joined(separator: ", ")
+  }
+
+  private var menuBarSegments: [MenuBarLabelSegment] {
+    Provider.allCases.flatMap { provider in menuBarSegments(for: provider) }
+  }
+
+  private func menuBarSegments(for provider: Provider) -> [MenuBarLabelSegment] {
+    let settings = menuBarAppearance.settings(for: provider)
+    let icon = settings.mode == .icon ? MenuBarArtwork.icon(for: provider) : nil
+    let label = icon == nil ? settings.displayLabel(for: provider) : nil
+    let providerSegment = MenuBarLabelSegment(icon: icon, label: label, status: "")
+
+    guard let state = states[provider] else {
+      return [MenuBarLabelSegment(icon: icon, label: label, status: "—")]
+    }
+    let selectedWindows = state.usage.map { settings.selectedWindows(for: $0) } ?? []
+    guard !selectedWindows.isEmpty else {
+      return [
+        MenuBarLabelSegment(
+          icon: icon,
+          label: label,
+          status: menuBarGroupStatus(for: state)
+        )
+      ]
+    }
+    return [providerSegment]
+      + selectedWindows.map { window in
+        MenuBarLabelSegment(
+          icon: nil,
+          label: settings.displayLabel(for: window),
+          status: menuBarWindowStatus(for: state, window: window)
+        )
+      }
+  }
+
+  private func menuBarGroupStatus(for state: ProviderState) -> String {
+    switch state.phase {
+    case .loading:
+      return "…"
+    case .failed:
+      return "!"
+    case .awaitingConsent, .unavailable:
+      return "—"
+    case .ready:
+      return "—"
+    }
+  }
+
+  private func menuBarWindowStatus(for state: ProviderState, window: UsageWindow) -> String {
+    switch state.phase {
+    case .ready:
+      return Self.percent(window.remainingPercent)
+    case .loading:
+      return "…"
+    case .failed:
+      return "!"
+    case .awaitingConsent, .unavailable:
+      return "—"
+    }
+  }
+
+  private func menuBarAccessibility(for provider: Provider) -> String {
+    let settings = menuBarAppearance.settings(for: provider)
+    let providerLabel =
+      settings.mode == .icon
+      ? provider.displayName
+      : settings.displayLabel(for: provider)
+    guard let state = states[provider] else {
+      return "\(providerLabel): 정보 없음"
+    }
+    let selectedWindows = state.usage.map { settings.selectedWindows(for: $0) } ?? []
+    guard !selectedWindows.isEmpty else {
+      return "\(providerLabel): \(menuBarAccessibilityGroupStatus(for: state))"
+    }
+    let windows = selectedWindows.map { window in
+      let label = settings.displayLabel(for: window) ?? window.title
+      let accessibleLabel = label.isEmpty ? window.id : label
+      let status: String
+      if state.phase == .ready {
+        status = "\(Self.percent(window.remainingPercent)) 남음"
+      } else {
+        status = menuBarAccessibilityGroupStatus(for: state)
+      }
+      return "\(accessibleLabel): \(status)"
+    }
+    return "\(providerLabel): \(windows.joined(separator: ", "))"
+  }
+
+  private func menuBarAccessibilityGroupStatus(for state: ProviderState) -> String {
+    switch state.phase {
+    case .loading:
+      return "불러오는 중"
+    case .failed:
+      return "오류"
+    case .awaitingConsent, .unavailable, .ready:
+      return "정보 없음"
+    }
+  }
   func acceptConsent() {
     guard !consentGranted else { return }
     consentGranted = true
@@ -66,7 +269,7 @@ private final class AgentMeterModel: ObservableObject {
     Task { [weak self] in
       guard let self else { return }
       await self.service.setConsent(true)
-      self.startAutomaticRefresh()
+      self.restartAutomaticRefresh()
       self.refreshAll()
     }
   }
@@ -158,12 +361,15 @@ private final class AgentMeterModel: ObservableObject {
     refreshTasks[provider] = task
   }
 
-  private func startAutomaticRefresh() {
+  private func restartAutomaticRefresh() {
     automaticTask?.cancel()
+    automaticTask = nil
+    guard consentGranted, let duration = refreshInterval.duration else { return }
+    let nanoseconds = UInt64(duration * 1_000_000_000)
     automaticTask = Task { [weak self] in
       while !Task.isCancelled {
         do {
-          try await Task.sleep(nanoseconds: 300_000_000_000)
+          try await Task.sleep(nanoseconds: nanoseconds)
         } catch {
           return
         }
@@ -179,27 +385,165 @@ private final class AgentMeterModel: ObservableObject {
     states[provider] = state
   }
 
-  private func summary(for provider: Provider) -> String {
-    let shortName = provider == .codex ? "Codex" : "Claude"
-    guard let state = states[provider] else { return "\(shortName) —" }
-    switch state.phase {
-    case .loading:
-      return "\(shortName) …"
-    case .failed:
-      return "\(shortName) !"
-    case .awaitingConsent, .unavailable:
-      return "\(shortName) —"
-    case .ready:
-      break
-    }
-    if let window = state.usage?.windows.first {
-      return "\(shortName) \(Self.percent(window.remainingPercent))"
-    }
-    return "\(shortName) —"
-  }
-
   private static func percent(_ value: Double) -> String {
     "\(Int(value.rounded()))%"
+  }
+}
+
+@MainActor
+private struct MenuBarLabelSegment {
+  let icon: NSImage?
+  let label: String?
+  let status: String
+}
+
+@MainActor
+private enum MenuBarArtwork {
+  // Codex artwork is the image used by the official Codex product page.
+  // https://chatgpt.com/codex/
+  // https://images.ctfassets.net/8su2tbn87fck/37ep8OPlSuUYpcTFkkW9NO/1a6381ac6612a83ec6d07b3fac5c5228/Blossom_4k_Icon_1.png
+  private static let codex = load(named: "codex")
+
+  // Claude artwork is the official Claude web app favicon.
+  // https://claude.ai/favicon.ico
+  private static let claude = load(named: "claude")
+
+  static func icon(for provider: Provider) -> NSImage? {
+    switch provider {
+    case .codex:
+      codex
+    case .claude:
+      claude
+    }
+  }
+
+  private static func load(named name: String) -> NSImage? {
+    let resources: Bundle?
+    if Bundle.main.bundleURL.pathExtension == "app" {
+      resources = Bundle.main.resourceURL
+        .flatMap { Bundle(url: $0.appendingPathComponent("AgentMeter_AgentMeter.bundle")) }
+    } else {
+      resources = Bundle.module
+    }
+    guard let url = resources?.url(forResource: name, withExtension: "png"),
+      let image = NSImage(contentsOf: url)
+    else {
+      return nil
+    }
+    image.isTemplate = false
+    return image
+  }
+}
+
+@MainActor
+private enum MenuBarLabelRenderer {
+  private static let horizontalPadding: CGFloat = 2
+  private static let iconDimension: CGFloat = 15
+  private static let iconTextSpacing: CGFloat = 4
+  private static let minimumHeight: CGFloat = 18
+
+  static func image(text: String) -> NSImage {
+    image(for: [MenuBarLabelSegment(icon: nil, label: text, status: "")])
+  }
+
+  static func image(for segments: [MenuBarLabelSegment]) -> NSImage {
+    let font = NSFont.systemFont(
+      ofSize: NSFont.systemFontSize(for: .small),
+      weight: .regular
+    )
+    let statusFont = NSFont.monospacedDigitSystemFont(
+      ofSize: font.pointSize,
+      weight: .regular
+    )
+    let color = NSColor.labelColor
+    let separator = attributed(" · ", font: font, color: color)
+    let layouts = segments.map { segment in
+      (
+        segment: segment,
+        label: segment.label.map { attributed($0, font: font, color: color) },
+        status: segment.status.isEmpty
+          ? nil
+          : attributed(segment.status, font: statusFont, color: color)
+      )
+    }
+
+    let textHeight = layouts.reduce(CGFloat.zero) { height, layout in
+      max(height, layout.label?.size().height ?? 0, layout.status?.size().height ?? 0)
+    }
+    let height = max(minimumHeight, ceil(max(iconDimension, textHeight)) + 2)
+    var width = horizontalPadding * 2
+    for (index, layout) in layouts.enumerated() {
+      if index > 0 {
+        width += separator.size().width
+      }
+      if layout.segment.icon != nil {
+        width += iconDimension
+        if layout.label != nil || layout.status != nil {
+          width += iconTextSpacing
+        }
+      }
+      if let label = layout.label {
+        width += label.size().width
+        if layout.status != nil {
+          width += iconTextSpacing
+        }
+      }
+      if let status = layout.status {
+        width += status.size().width
+      }
+    }
+
+    let image = NSImage(size: NSSize(width: ceil(width), height: height))
+    image.isTemplate = false
+    image.lockFocusFlipped(true)
+    defer { image.unlockFocus() }
+
+    var x = horizontalPadding
+    for (index, layout) in layouts.enumerated() {
+      if index > 0 {
+        separator.draw(at: NSPoint(x: x, y: (height - separator.size().height) / 2))
+        x += separator.size().width
+      }
+      if let icon = layout.segment.icon {
+        let y = (height - iconDimension) / 2
+        icon.draw(
+          in: NSRect(x: x, y: y, width: iconDimension, height: iconDimension),
+          from: .zero,
+          operation: .sourceOver,
+          fraction: 1
+        )
+        x += iconDimension
+        if layout.label != nil || layout.status != nil {
+          x += iconTextSpacing
+        }
+      }
+      if let label = layout.label {
+        label.draw(at: NSPoint(x: x, y: (height - label.size().height) / 2))
+        x += label.size().width
+        if layout.status != nil {
+          x += iconTextSpacing
+        }
+      }
+      if let status = layout.status {
+        status.draw(at: NSPoint(x: x, y: (height - status.size().height) / 2))
+        x += status.size().width
+      }
+    }
+    return image
+  }
+
+  private static func attributed(
+    _ string: String,
+    font: NSFont,
+    color: NSColor
+  ) -> NSAttributedString {
+    NSAttributedString(
+      string: string,
+      attributes: [
+        .font: font,
+        .foregroundColor: color,
+      ]
+    )
   }
 }
 
@@ -208,15 +552,18 @@ private struct AgentMeterMenu: View {
   @ObservedObject var model: AgentMeterModel
 
   var body: some View {
-    Group {
-      if model.consentGranted {
-        usageContent
-      } else {
-        consentContent
+    ScrollView(.vertical) {
+      Group {
+        if model.consentGranted {
+          usageContent
+        } else {
+          consentContent
+        }
       }
+      .padding(14)
+      .frame(width: 390, alignment: .leading)
     }
-    .padding(14)
-    .frame(width: 390)
+    .frame(width: 390, height: 640)
   }
 
   private var consentContent: some View {
@@ -269,7 +616,20 @@ private struct AgentMeterMenu: View {
           NSApplication.shared.terminate(nil)
         }
       }
-      Text("자동 새로 고침: 5분마다 · 모든 시간은 이 Mac의 현지 시간")
+      Picker(
+        "자동 새로 고침",
+        selection: Binding(
+          get: { model.refreshInterval },
+          set: { model.setRefreshInterval($0) }
+        )
+      ) {
+        ForEach(RefreshInterval.allCases) { interval in
+          Text(interval.label).tag(interval)
+        }
+      }
+      .pickerStyle(.menu)
+      menuBarAppearanceSettings
+      Text("모든 시간은 이 Mac의 현지 시간")
         .font(.caption)
         .foregroundStyle(.secondary)
       Text(
@@ -283,6 +643,20 @@ private struct AgentMeterMenu: View {
       }
       .font(.caption)
       .buttonStyle(.link)
+    }
+  }
+
+  private var menuBarAppearanceSettings: some View {
+    DisclosureGroup("상단바 표시 설정") {
+      VStack(alignment: .leading, spacing: 8) {
+        ForEach(Provider.allCases) { provider in
+          MenuBarProviderSettingsRow(provider: provider, model: model)
+        }
+        Text("이름은 최대 20자이며 공백과 제어 문자는 정리됩니다.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+      .padding(.top, 4)
     }
   }
 }
@@ -380,5 +754,132 @@ private struct ProviderCard: View {
 
   private static func localDate(_ date: Date) -> String {
     date.formatted(date: .abbreviated, time: .shortened)
+  }
+}
+
+@MainActor
+private struct MenuBarProviderSettingsRow: View {
+  let provider: Provider
+  @ObservedObject var model: AgentMeterModel
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack {
+        Text(provider.displayName)
+          .font(.subheadline)
+          .fontWeight(.semibold)
+        Spacer()
+        Picker(
+          "표시 방식",
+          selection: Binding(
+            get: { model.menuBarAppearance.settings(for: provider).mode },
+            set: { model.setMenuBarDisplayMode($0, for: provider) }
+          )
+        ) {
+          Text("텍스트").tag(MenuBarDisplayMode.text)
+          Text("아이콘").tag(MenuBarDisplayMode.icon)
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .frame(width: 124)
+      }
+      let settings = model.menuBarAppearance.settings(for: provider)
+      if settings.mode == .text {
+        TextField(
+          "\(provider.displayName) 표시 이름 (기본값: \(provider.displayName))",
+          text: Binding(
+            get: { model.menuBarAppearance.settings(for: provider).customLabel },
+            set: { model.setMenuBarCustomLabel($0, for: provider) }
+          )
+        )
+        .textFieldStyle(.roundedBorder)
+      } else {
+        Text("제공자 공식 아이콘")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      Divider()
+      Text("표시할 사용량")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      if let usage = model.states[provider]?.usage, !usage.windows.isEmpty {
+        ForEach(usage.windows) { window in
+          MenuBarWindowSettingsRow(
+            provider: provider,
+            window: window,
+            model: model
+          )
+        }
+      } else {
+        Text("사용량 한도 목록을 불러오면 선택할 수 있습니다.")
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+    }
+  }
+
+}
+
+@MainActor
+private struct MenuBarWindowSettingsRow: View {
+  let provider: Provider
+  let window: UsageWindow
+  @ObservedObject var model: AgentMeterModel
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      HStack(spacing: 8) {
+        Toggle(
+          isOn: Binding(
+            get: { model.isMenuBarWindowSelected(window.id, for: provider) },
+            set: {
+              model.setMenuBarWindowSelected(
+                $0,
+                windowID: window.id,
+                for: provider
+              )
+            }
+          )
+        ) {
+          Text(window.title)
+            .lineLimit(1)
+        }
+        Picker(
+          "라벨",
+          selection: Binding(
+            get: { model.menuBarWindowLabelMode(for: window.id, provider: provider) },
+            set: {
+              model.setMenuBarWindowLabelMode(
+                $0,
+                for: window.id,
+                provider: provider
+              )
+            }
+          )
+        ) {
+          ForEach(MenuBarWindowLabelMode.allCases, id: \.self) { mode in
+            Text(mode.label).tag(mode)
+          }
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+      }
+      if model.menuBarWindowLabelMode(for: window.id, provider: provider) == .custom {
+        TextField(
+          "직접 입력 (비워두면 라벨 숨김)",
+          text: Binding(
+            get: { model.menuBarWindowCustomLabel(for: window.id, provider: provider) },
+            set: {
+              model.setMenuBarWindowCustomLabel(
+                $0,
+                for: window.id,
+                provider: provider
+              )
+            }
+          )
+        )
+        .textFieldStyle(.roundedBorder)
+      }
+    }
   }
 }
