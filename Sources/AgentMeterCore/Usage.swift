@@ -532,6 +532,7 @@ public enum ClaudeUsageParser {
     {
       windows.append(sevenDay)
     }
+    windows.append(contentsOf: try parseFableWindows(root["limits"]))
     return ProviderUsage(provider: .claude, windows: windows, updatedAt: now)
   }
 
@@ -549,11 +550,7 @@ public enum ClaudeUsageParser {
     guard let object = raw as? [String: Any] else {
       throw UsageParsingError.invalidSchema(.claude)
     }
-    guard let rawUtilization = object["utilization"] else { return nil }
-    if rawUtilization is NSNull { return nil }
-    guard let utilization = JSONSupport.number(rawUtilization), utilization >= 0 else {
-      throw UsageParsingError.invalidSchema(.claude)
-    }
+    guard let utilization = try parseUtilization(object["utilization"]) else { return nil }
 
     var resetAt: Date?
     if let rawReset = object["resets_at"], !(rawReset is NSNull) {
@@ -565,6 +562,61 @@ public enum ClaudeUsageParser {
       resetAt = date
     }
     return UsageWindow(id: id, title: title, remainingPercent: 100 - utilization, resetAt: resetAt)
+  }
+
+  private static func parseFableWindows(_ raw: Any?) throws -> [UsageWindow] {
+    guard let raw else { return [] }
+    if raw is NSNull { return [] }
+    guard let limits = raw as? [Any] else {
+      throw UsageParsingError.invalidSchema(.claude)
+    }
+
+    var windows: [UsageWindow] = []
+    var fableIndex = 0
+    for rawLimit in limits {
+      guard let limit = rawLimit as? [String: Any] else {
+        throw UsageParsingError.invalidSchema(.claude)
+      }
+      guard JSONSupport.string(limit["kind"]) == "weekly_scoped",
+        JSONSupport.string(limit["group"]) == "weekly",
+        let scope = limit["scope"] as? [String: Any],
+        let model = scope["model"] as? [String: Any],
+        let displayName = JSONSupport.string(model["display_name"]),
+        displayName.caseInsensitiveCompare("Fable") == .orderedSame
+      else {
+        continue
+      }
+
+      guard let utilization = try parseUtilization(limit["percent"]) else { continue }
+
+      var resetAt: Date?
+      if let rawReset = limit["resets_at"], !(rawReset is NSNull) {
+        guard let value = rawReset as? String,
+          let date = parseISO8601(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        else {
+          throw UsageParsingError.invalidSchema(.claude)
+        }
+        resetAt = date
+      }
+
+      fableIndex += 1
+      let id = fableIndex == 1 ? "claude-fable-weekly" : "claude-fable-weekly-\(fableIndex)"
+      windows.append(
+        UsageWindow(
+          id: id,
+          title: "Fable 7일 주간",
+          remainingPercent: 100 - utilization,
+          resetAt: resetAt))
+    }
+    return windows
+  }
+
+  private static func parseUtilization(_ raw: Any?) throws -> Double? {
+    guard let raw, !(raw is NSNull) else { return nil }
+    guard let utilization = JSONSupport.number(raw), utilization >= 0 else {
+      throw UsageParsingError.invalidSchema(.claude)
+    }
+    return utilization
   }
 }
 

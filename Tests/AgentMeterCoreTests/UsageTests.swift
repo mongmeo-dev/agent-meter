@@ -81,14 +81,265 @@ final class UsageTests: XCTestCase {
       ClaudeUsageParser.parseISO8601("2024-01-15T12:34:56.123Z"))
   }
 
+  func testClaudeActiveFableLimitAppendsAfterBaseWindows() throws {
+    let data = Data(
+      """
+      {
+        "five_hour": {"utilization": 10},
+        "seven_day": {"utilization": 20},
+        "limits": [
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 34.5,
+            "resets_at": "2024-01-22T00:00:00.123Z",
+            "scope": {"model": {"id": "fable-model", "display_name": "  fAbLe  "}},
+            "is_active": true
+          }
+        ]
+      }
+      """.utf8)
+
+    let usage = try ClaudeUsageParser.parse(data: data, now: now)
+
+    XCTAssertEqual(
+      usage.windows.map(\.id),
+      ["claude-five-hour", "claude-seven-day", "claude-fable-weekly"])
+    XCTAssertEqual(usage.windows[2].title, "Fable 7일 주간")
+    XCTAssertEqual(usage.windows[2].remainingPercent, 65.5, accuracy: 0.001)
+    XCTAssertEqual(
+      usage.windows[2].resetAt,
+      ClaudeUsageParser.parseISO8601("2024-01-22T00:00:00.123Z"))
+  }
+
+  func testClaudeFableLimitCanBeParsedWithoutBaseWindows() throws {
+    let data = Data(
+      """
+      {
+        "limits": [
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 12.25,
+            "scope": {"model": {"display_name": "FABLE"}}
+          }
+        ]
+      }
+      """.utf8)
+
+    let usage = try ClaudeUsageParser.parse(data: data, now: now)
+
+    XCTAssertEqual(usage.windows.map(\.id), ["claude-fable-weekly"])
+    XCTAssertEqual(usage.windows[0].remainingPercent, 87.75, accuracy: 0.001)
+    XCTAssertNil(usage.windows[0].resetAt)
+  }
+
+  func testClaudeFableLimitsSkipNonFableEntries() throws {
+    let data = Data(
+      """
+      {
+        "limits": [
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": true,
+            "scope": {"model": {"id": "sonnet", "display_name": "Sonnet"}}
+          },
+          {
+            "kind": "monthly_scoped",
+            "group": "weekly",
+            "percent": -1,
+            "scope": {"model": {"id": "fable", "display_name": "Fable"}}
+          },
+          {
+            "kind": "weekly_scoped",
+            "group": "daily",
+            "percent": 10,
+            "scope": {"model": {"id": "fable", "display_name": "Fable"}}
+          },
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 10,
+            "scope": {"model": {"id": "Fable", "display_name": "Sonnet"}}
+          }
+        ]
+      }
+      """.utf8)
+
+    let usage = try ClaudeUsageParser.parse(data: data, now: now)
+
+    XCTAssertTrue(usage.windows.isEmpty)
+  }
+
+  func testClaudeInactiveFableLimitWithNullModelIDIsStillShown() throws {
+    let data = Data(
+      """
+      {
+        "limits": [
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 11,
+            "scope": {"model": {"id": null, "display_name": "Fable"}},
+            "is_active": false
+          }
+        ]
+      }
+      """.utf8)
+
+    let usage = try ClaudeUsageParser.parse(data: data, now: now)
+
+    XCTAssertEqual(usage.windows.map(\.id), ["claude-fable-weekly"])
+    XCTAssertEqual(usage.windows[0].title, "Fable 7일 주간")
+    XCTAssertEqual(usage.windows[0].remainingPercent, 89, accuracy: 0.001)
+  }
+
+  func testClaudeFableMissingAndNullPercentDoNotFabricateWindows() throws {
+    let data = Data(
+      """
+      {
+        "limits": [
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "scope": {"model": {"display_name": "Fable"}}
+          },
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": null,
+            "scope": {"model": {"display_name": "Fable"}}
+          }
+        ]
+      }
+      """.utf8)
+
+    let usage = try ClaudeUsageParser.parse(data: data, now: now)
+
+    XCTAssertTrue(usage.windows.isEmpty)
+  }
+
+  func testClaudeFableMalformedPercentFailsClosed() {
+    for percent in ["true", "-0.1"] {
+      let data = Data(
+        """
+        {
+          "limits": [{
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": \(percent),
+            "scope": {"model": {"display_name": "Fable"}}
+          }]
+        }
+        """.utf8)
+
+      XCTAssertThrowsError(try ClaudeUsageParser.parse(data: data, now: now)) { error in
+        XCTAssertEqual(error as? UsageParsingError, .invalidSchema(.claude))
+      }
+    }
+  }
+
+  func testClaudeFableZeroAndOnePercentRemainNumeric() throws {
+    let data = Data(
+      """
+      {
+        "limits": [
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 0,
+            "scope": {"model": {"display_name": "Fable"}}
+          },
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 1,
+            "scope": {"model": {"display_name": "Fable"}}
+          }
+        ]
+      }
+      """.utf8)
+
+    let usage = try ClaudeUsageParser.parse(data: data, now: now)
+
+    XCTAssertEqual(usage.windows.map(\.remainingPercent), [100, 99])
+  }
+
+  func testClaudeFableLimitResetDateMustBeValidISO8601() throws {
+    let valid = Data(
+      """
+      {
+        "limits": [{
+          "kind": "weekly_scoped",
+          "group": "weekly",
+          "percent": 25.25,
+          "resets_at": "2024-01-22T00:00:00Z",
+          "scope": {"model": {"display_name": "Fable"}}
+        }]
+      }
+      """.utf8)
+    let validUsage = try ClaudeUsageParser.parse(data: valid, now: now)
+    XCTAssertEqual(
+      validUsage.windows[0].resetAt,
+      ClaudeUsageParser.parseISO8601("2024-01-22T00:00:00Z"))
+    XCTAssertEqual(validUsage.windows[0].remainingPercent, 74.75, accuracy: 0.001)
+
+    let invalid = Data(
+      """
+      {
+        "limits": [{
+          "kind": "weekly_scoped",
+          "group": "weekly",
+          "percent": 25,
+          "resets_at": "not-a-date",
+          "scope": {"model": {"display_name": "Fable"}}
+        }]
+      }
+      """.utf8)
+    XCTAssertThrowsError(try ClaudeUsageParser.parse(data: invalid, now: now)) { error in
+      XCTAssertEqual(error as? UsageParsingError, .invalidSchema(.claude))
+    }
+  }
+
+  func testClaudeFableLimitIDsAreUniqueForMultipleEntries() throws {
+    let data = Data(
+      """
+      {
+        "limits": [
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 10,
+            "scope": {"model": {"id": "first", "display_name": "Fable"}}
+          },
+          {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 20,
+            "scope": {"model": {"id": "second", "display_name": "fable"}}
+          }
+        ]
+      }
+      """.utf8)
+
+    let usage = try ClaudeUsageParser.parse(data: data, now: now)
+
+    XCTAssertEqual(usage.windows.map(\.id), ["claude-fable-weekly", "claude-fable-weekly-2"])
+    XCTAssertEqual(Set(usage.windows.map(\.id)).count, 2)
+  }
+
   func testMissingLimitsAreUnavailableRatherThanFull() throws {
     let codex = try CodexUsageParser.parse(data: Data("{}".utf8), now: now)
     let claude = try ClaudeUsageParser.parse(
       data: Data("{\"five_hour\":null,\"seven_day\":{\"utilization\":null}}".utf8),
       now: now)
+    let claudeWithNullLimits = try ClaudeUsageParser.parse(
+      data: Data("{\"limits\":null}".utf8), now: now)
 
     XCTAssertTrue(codex.windows.isEmpty)
     XCTAssertTrue(claude.windows.isEmpty)
+    XCTAssertTrue(claudeWithNullLimits.windows.isEmpty)
   }
 
   func testMalformedLimitSchemaFailsClosed() {
