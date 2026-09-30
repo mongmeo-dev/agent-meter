@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2A303A"/>
+      <stop offset="1" stop-color="#0F1217"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(512 520) scale(420)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F29A5C" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#F29A5C" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="level" x1="259.1" y1="714.0" x2="673.6" y2="324.8" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3DD9A0"/>
+      <stop offset="0.55" stop-color="#F2C14E"/>
+      <stop offset="1" stop-color="#EE7A45"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-10%" y="-8%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <filter id="markShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#tileShadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#glow)"/>
+  <rect x="106" y="106" width="812" height="812" rx="179" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="4"/>
+
+  <path d="M 259.1 714.0 A 292 292 0 1 1 764.9 714.0" fill="none" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="64" stroke-linecap="round"/>
+  <path d="M 259.1 714.0 A 292 292 0 0 1 673.6 324.8" fill="none" stroke="url(#level)" stroke-width="64" stroke-linecap="round"/>
+
+  <g stroke="#FFFFFF" stroke-opacity="0.38" stroke-width="12" stroke-linecap="round">
+    <line x1="342.3" y1="666.0" x2="309.4" y2="685.0"/>
+    <line x1="316.0" y1="568.0" x2="290.0" y2="568.0"/>
+    <line x1="342.3" y1="470.0" x2="309.4" y2="451.0"/>
+    <line x1="414.0" y1="398.3" x2="401.0" y2="375.7"/>
+    <line x1="512.0" y1="372.0" x2="512.0" y2="334.0"/>
+    <line x1="610.0" y1="398.3" x2="623.0" y2="375.7"/>
+    <line x1="681.7" y1="470.0" x2="714.6" y2="451.0"/>
+    <line x1="708.0" y1="568.0" x2="734.0" y2="568.0"/>
+    <line x1="681.7" y1="666.0" x2="714.6" y2="685.0"/>
+  </g>
+
+  <g filter="url(#markShadow)">
+    <path d="M 643.7 369.8 L 533.7 582.4 L 479.9 616.3 L 490.3 553.6 Z" fill="#F5F2EC" stroke="#F5F2EC" stroke-width="10" stroke-linejoin="round"/>
+    <circle cx="512" cy="568" r="46" fill="#F5F2EC"/>
+    <circle cx="512" cy="568" r="18" fill="#EE7A45"/>
+  </g>
+</svg>

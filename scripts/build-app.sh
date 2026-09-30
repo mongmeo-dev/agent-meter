@@ -99,6 +99,7 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$FRAMEWORKS_DIR"
 cp "$EXECUTABLE" "$APP_DIR/Contents/MacOS/AgentMeter"
 cp -R "$RESOURCE_BUNDLE" "$APP_DIR/Contents/Resources/"
+cp "$ROOT_DIR/artwork/AppIcon.icns" "$APP_DIR/Contents/Resources/AppIcon.icns"
 ditto "$SPARKLE_FRAMEWORK" "$FRAMEWORKS_DIR/Sparkle.framework"
 chmod 755 "$APP_DIR/Contents/MacOS/AgentMeter"
 
@@ -131,6 +132,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
     <string>Agent Meter</string>
     <key>CFBundleExecutable</key>
     <string>AgentMeter</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>dev.mongmeo.agent-meter</string>
     <key>CFBundleName</key>
