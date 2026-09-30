@@ -49,7 +49,7 @@ private final class AgentMeterModel: ObservableObject {
   @Published private(set) var states: [Provider: ProviderState]
 
   init() {
-    self.service = UsageService()
+    self.service = UsageService(store: UserDefaultsUsageRequestStore())
     let granted = UserDefaults.standard.bool(forKey: Self.consentKey)
     self.consentGranted = granted
     self.refreshInterval = RefreshInterval.load()
@@ -354,11 +354,16 @@ private final class AgentMeterModel: ObservableObject {
       } catch is CancellationError {
         return
       } catch let error as UsageFetchError {
+        let cachedUsage = await self.service.cachedUsage(for: provider)
         guard !Task.isCancelled,
           self.consentGranted,
           self.refreshGenerations[provider] == generation
         else { return }
         self.updateState(for: provider) { state in
+          if state.usage == nil, let cachedUsage {
+            state.usage = cachedUsage
+            state.lastSuccessfulUpdate = cachedUsage.updatedAt
+          }
           state.phase = .failed
           state.message = error.userMessage
           state.retryAt = error.retryAt

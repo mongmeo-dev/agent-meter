@@ -18,7 +18,7 @@ public enum Provider: String, CaseIterable, Identifiable, Codable, Sendable {
   }
 }
 
-public struct UsageWindow: Identifiable, Equatable, Sendable {
+public struct UsageWindow: Identifiable, Equatable, Codable, Sendable {
   public let id: String
   public let title: String
   public let remainingPercent: Double
@@ -33,7 +33,7 @@ public struct UsageWindow: Identifiable, Equatable, Sendable {
 
 }
 
-public struct ProviderUsage: Equatable, Sendable {
+public struct ProviderUsage: Equatable, Codable, Sendable {
   public let provider: Provider
   public let windows: [UsageWindow]
   public let updatedAt: Date
@@ -163,13 +163,17 @@ public enum UsageFetchError: Error, LocalizedError, Equatable, Sendable {
   case unauthorized(Provider)
   case forbidden(Provider)
   case rateLimited(Provider, retryAt: Date?)
+  case requestThrottled(Provider, retryAt: Date)
   case serverError(Provider, statusCode: Int)
   case invalidResponse(Provider)
   case network(Provider)
 
   public var retryAt: Date? {
-    guard case .rateLimited(_, let date) = self else { return nil }
-    return date
+    switch self {
+    case .rateLimited(_, let date): date
+    case .requestThrottled(_, let date): date
+    default: nil
+    }
   }
 
   public var userMessage: String {
@@ -196,6 +200,8 @@ public enum UsageFetchError: Error, LocalizedError, Equatable, Sendable {
       } else {
         "\(provider.displayName) API 요청이 제한되었습니다. 지정된 대기 시간이 지나면 다시 시도하세요."
       }
+    case .requestThrottled(let provider, _):
+      "\(provider.displayName) API 호출 한도를 지키기 위해 직전 실패 후 요청을 잠시 보류했습니다."
     case .serverError(let provider, let statusCode):
       "\(provider.displayName) 서버 오류(HTTP \(statusCode))입니다. 잠시 후 다시 시도하세요."
     case .invalidResponse(let provider):
@@ -699,43 +705,179 @@ public final class URLSessionHTTPTransport: UsageHTTPTransport, @unchecked Senda
   }
 }
 
-public actor UsageService {
-  private struct RateLimitState {
-    var failures: Int
-    var blockedUntil: Date
+/// Request pacing for one provider's usage endpoint.
+///
+/// `minimumInterval` is how long a successful response is reused before the endpoint is
+/// called again, `failureRetryInterval` spaces out retries after non-429 failures, and the
+/// rate-limit backoff bounds apply when the server answers HTTP 429.
+public struct UsageRequestPolicy: Equatable, Sendable {
+  public let minimumInterval: TimeInterval
+  public let failureRetryInterval: TimeInterval
+  public let minimumRateLimitBackoff: TimeInterval
+  public let maximumRateLimitBackoff: TimeInterval
+
+  public init(
+    minimumInterval: TimeInterval,
+    failureRetryInterval: TimeInterval,
+    minimumRateLimitBackoff: TimeInterval,
+    maximumRateLimitBackoff: TimeInterval
+  ) {
+    self.minimumInterval = minimumInterval
+    self.failureRetryInterval = failureRetryInterval
+    self.minimumRateLimitBackoff = minimumRateLimitBackoff
+    self.maximumRateLimitBackoff = maximumRateLimitBackoff
   }
 
+  /// Timer ticks can fire slightly before `minimumInterval` has elapsed; this slack keeps a
+  /// refresh interval equal to `minimumInterval` from skipping every other tick.
+  public static let scheduleTolerance: TimeInterval = 10
+  /// Upper bound for a server-provided or persisted cooldown, guarding against bogus
+  /// `Retry-After` values and wall-clock rollbacks.
+  public static let maximumCooldown: TimeInterval = 86_400
+
+  public static func standard(for provider: Provider) -> UsageRequestPolicy {
+    switch provider {
+    case .codex:
+      UsageRequestPolicy(
+        minimumInterval: 0,
+        failureRetryInterval: 0,
+        minimumRateLimitBackoff: 30,
+        maximumRateLimitBackoff: 900)
+    case .claude:
+      // api.anthropic.com/api/oauth/usage throttles third-party clients aggressively and
+      // answers with multi-minute Retry-After values, so poll it at most every 10 minutes.
+      UsageRequestPolicy(
+        minimumInterval: 600,
+        failureRetryInterval: 60,
+        minimumRateLimitBackoff: 600,
+        maximumRateLimitBackoff: 3_600)
+    }
+  }
+}
+
+/// Persisted pacing state so an app restart cannot bypass cooldowns.
+public struct UsageRequestRecord: Codable, Equatable, Sendable {
+  public var cachedUsage: ProviderUsage?
+  public var lastFailureAt: Date?
+  public var rateLimitFailures: Int
+  public var blockedUntil: Date?
+
+  public init(
+    cachedUsage: ProviderUsage? = nil,
+    lastFailureAt: Date? = nil,
+    rateLimitFailures: Int = 0,
+    blockedUntil: Date? = nil
+  ) {
+    self.cachedUsage = cachedUsage
+    self.lastFailureAt = lastFailureAt
+    self.rateLimitFailures = rateLimitFailures
+    self.blockedUntil = blockedUntil
+  }
+}
+
+public protocol UsageRequestStore: Sendable {
+  func load(_ provider: Provider) -> UsageRequestRecord?
+  func save(_ record: UsageRequestRecord, for provider: Provider)
+}
+
+public final class InMemoryUsageRequestStore: UsageRequestStore, @unchecked Sendable {
+  private let lock = NSLock()
+  private var records: [Provider: UsageRequestRecord]
+
+  public init(records: [Provider: UsageRequestRecord] = [:]) {
+    self.records = records
+  }
+
+  public func load(_ provider: Provider) -> UsageRequestRecord? {
+    lock.withLock { records[provider] }
+  }
+
+  public func save(_ record: UsageRequestRecord, for provider: Provider) {
+    lock.withLock { records[provider] = record }
+  }
+}
+
+public final class UserDefaultsUsageRequestStore: UsageRequestStore, @unchecked Sendable {
+  private static let keyPrefix = "AgentMeter.usageRequestRecord."
+  private let defaults: UserDefaults
+
+  public init(defaults: UserDefaults = .standard) {
+    self.defaults = defaults
+  }
+
+  public func load(_ provider: Provider) -> UsageRequestRecord? {
+    guard let data = defaults.data(forKey: Self.key(for: provider)) else { return nil }
+    return try? JSONDecoder().decode(UsageRequestRecord.self, from: data)
+  }
+
+  public func save(_ record: UsageRequestRecord, for provider: Provider) {
+    guard let data = try? JSONEncoder().encode(record) else { return }
+    defaults.set(data, forKey: Self.key(for: provider))
+  }
+
+  private static func key(for provider: Provider) -> String {
+    keyPrefix + provider.rawValue
+  }
+}
+
+public actor UsageService {
   private let credentialReader: any CredentialReader
   private let transport: any UsageHTTPTransport
+  private let store: any UsageRequestStore
+  private let policy: @Sendable (Provider) -> UsageRequestPolicy
   private var consentGranted = false
-  private var rateLimits: [Provider: RateLimitState] = [:]
+  private var records: [Provider: UsageRequestRecord] = [:]
 
   public init(
     credentialReader: any CredentialReader = LocalCredentialReader(),
-    transport: any UsageHTTPTransport = URLSessionHTTPTransport()
+    transport: any UsageHTTPTransport = URLSessionHTTPTransport(),
+    store: any UsageRequestStore = InMemoryUsageRequestStore(),
+    policy: @escaping @Sendable (Provider) -> UsageRequestPolicy = UsageRequestPolicy.standard
   ) {
     self.credentialReader = credentialReader
     self.transport = transport
+    self.store = store
+    self.policy = policy
   }
 
+  /// Revoking consent forgets cached usage but keeps cooldowns, so re-granting consent
+  /// cannot be used to hammer a rate-limited endpoint.
   public func setConsent(_ granted: Bool) {
     consentGranted = granted
-    if !granted { rateLimits.removeAll() }
+    guard !granted else { return }
+    for provider in Provider.allCases where record(for: provider).cachedUsage != nil {
+      update(provider) { $0.cachedUsage = nil }
+    }
   }
 
   public func hasConsent() -> Bool { consentGranted }
 
-  public func nextRetryAt(for provider: Provider, now: Date = Date()) -> Date? {
-    guard let blockedUntil = rateLimits[provider]?.blockedUntil, blockedUntil > now else {
-      return nil
-    }
-    return blockedUntil
+  public func cachedUsage(for provider: Provider) -> ProviderUsage? {
+    guard consentGranted else { return nil }
+    return record(for: provider).cachedUsage
   }
 
   public func fetch(_ provider: Provider, now: Date = Date()) async throws -> ProviderUsage {
     guard consentGranted else { throw UsageFetchError.consentRequired }
-    if let blockedUntil = rateLimits[provider]?.blockedUntil, blockedUntil > now {
-      throw UsageFetchError.rateLimited(provider, retryAt: blockedUntil)
+    let policy = policy(provider)
+    let current = record(for: provider)
+
+    if let blockedUntil = current.blockedUntil, blockedUntil > now {
+      let retryAt = min(blockedUntil, now.addingTimeInterval(UsageRequestPolicy.maximumCooldown))
+      throw UsageFetchError.rateLimited(provider, retryAt: retryAt)
+    }
+    if let cached = current.cachedUsage, policy.minimumInterval > 0 {
+      let age = now.timeIntervalSince(cached.updatedAt)
+      if age >= 0, age < policy.minimumInterval - UsageRequestPolicy.scheduleTolerance {
+        return cached
+      }
+    }
+    if let failedAt = current.lastFailureAt, policy.failureRetryInterval > 0 {
+      let elapsed = now.timeIntervalSince(failedAt)
+      if elapsed >= 0, elapsed < policy.failureRetryInterval {
+        throw UsageFetchError.requestThrottled(
+          provider, retryAt: failedAt.addingTimeInterval(policy.failureRetryInterval))
+      }
     }
 
     let request: URLRequest
@@ -762,45 +904,70 @@ public actor UsageService {
     } catch is CancellationError {
       throw CancellationError()
     } catch {
+      recordFailure(provider, at: now)
       throw UsageFetchError.network(provider)
     }
 
     switch response.statusCode {
     case 200:
+      let usage: ProviderUsage
       do {
-        let usage: ProviderUsage
         switch provider {
         case .codex:
           usage = try CodexUsageParser.parse(data: response.data, now: now)
         case .claude:
           usage = try ClaudeUsageParser.parse(data: response.data, now: now)
         }
-        rateLimits.removeValue(forKey: provider)
-        return usage
       } catch {
+        recordFailure(provider, at: now)
         throw UsageFetchError.invalidResponse(provider)
       }
+      update(provider) { $0 = UsageRequestRecord(cachedUsage: usage) }
+      return usage
     case 401:
+      recordFailure(provider, at: now)
       throw UsageFetchError.unauthorized(provider)
     case 403:
+      recordFailure(provider, at: now)
       throw UsageFetchError.forbidden(provider)
     case 429:
-      let failureCount = (rateLimits[provider]?.failures ?? 0) + 1
-      let fallbackDelay = Self.backoffDelay(forFailure: failureCount)
-      let requestedRetry = Self.retryAfterDate(from: response, now: now)
-      let delay: TimeInterval
-      if let requestedRetry {
+      let failureCount = record(for: provider).rateLimitFailures + 1
+      var delay = Self.backoffDelay(forFailure: failureCount, policy: policy)
+      if let requestedRetry = Self.retryAfterDate(from: response, now: now) {
         let requestedDelay = requestedRetry.timeIntervalSince(now)
-        delay = requestedDelay > 0 ? requestedDelay : fallbackDelay
-      } else {
-        delay = fallbackDelay
+        if requestedDelay > 0 {
+          delay = max(policy.minimumRateLimitBackoff, requestedDelay)
+        }
       }
+      delay = min(delay, UsageRequestPolicy.maximumCooldown)
       let blockedUntil = now.addingTimeInterval(delay)
-      rateLimits[provider] = RateLimitState(failures: failureCount, blockedUntil: blockedUntil)
+      update(provider) {
+        $0.rateLimitFailures = failureCount
+        $0.blockedUntil = blockedUntil
+      }
       throw UsageFetchError.rateLimited(provider, retryAt: blockedUntil)
     default:
+      recordFailure(provider, at: now)
       throw UsageFetchError.serverError(provider, statusCode: response.statusCode)
     }
+  }
+
+  private func record(for provider: Provider) -> UsageRequestRecord {
+    if let record = records[provider] { return record }
+    let record = store.load(provider) ?? UsageRequestRecord()
+    records[provider] = record
+    return record
+  }
+
+  private func update(_ provider: Provider, _ change: (inout UsageRequestRecord) -> Void) {
+    var record = record(for: provider)
+    change(&record)
+    records[provider] = record
+    store.save(record, for: provider)
+  }
+
+  private func recordFailure(_ provider: Provider, at date: Date) {
+    update(provider) { $0.lastFailureAt = date }
   }
 
   private static func mapCredentialError(_ error: CredentialError, provider: Provider)
@@ -818,10 +985,12 @@ public actor UsageService {
     }
   }
 
-  private static func backoffDelay(forFailure failure: Int) -> TimeInterval {
-    let exponent = min(max(failure - 1, 0), 5)
-    let multiplier = 1 << exponent
-    return TimeInterval(min(900, 30 * multiplier))
+  private static func backoffDelay(forFailure failure: Int, policy: UsageRequestPolicy)
+    -> TimeInterval
+  {
+    let exponent = min(max(failure - 1, 0), 10)
+    let delay = policy.minimumRateLimitBackoff * Double(1 << exponent)
+    return min(policy.maximumRateLimitBackoff, delay)
   }
 
   public static func retryAfterDate(from response: HTTPResponse, now: Date = Date()) -> Date? {

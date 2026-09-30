@@ -429,10 +429,10 @@ final class UsageTests: XCTestCase {
     await service.setConsent(true)
 
     do {
-      _ = try await service.fetch(.claude, now: now)
+      _ = try await service.fetch(.codex, now: now)
       XCTFail("HTTP 429 must fail")
     } catch let error as UsageFetchError {
-      guard case .rateLimited(.claude, let retryDate) = error,
+      guard case .rateLimited(.codex, let retryDate) = error,
         let retryAt = retryDate
       else {
         return XCTFail("expected rate limit")
@@ -443,10 +443,10 @@ final class UsageTests: XCTestCase {
     }
 
     do {
-      _ = try await service.fetch(.claude, now: now.addingTimeInterval(30))
+      _ = try await service.fetch(.codex, now: now.addingTimeInterval(30))
       XCTFail("manual refresh must honor Retry-After")
     } catch let error as UsageFetchError {
-      guard case .rateLimited(.claude, let retryAt) = error else {
+      guard case .rateLimited(.codex, let retryAt) = error else {
         return XCTFail("expected blocked rate limit")
       }
       XCTAssertEqual(retryAt, now.addingTimeInterval(60))
@@ -472,6 +472,186 @@ final class UsageTests: XCTestCase {
       XCTAssertEqual(retryAt.timeIntervalSince(now), 30, accuracy: 0.001)
     } catch {
       XCTFail("unexpected error: \(error)")
+    }
+  }
+
+  func testClaudeSuccessIsReusedUntilMinimumIntervalElapses() async throws {
+    let reader = StubCredentialReader()
+    let transport = StubTransport(
+      result: .success(HTTPResponse(statusCode: 200, data: claudeUsageBody)))
+    let service = UsageService(credentialReader: reader, transport: transport)
+    await service.setConsent(true)
+
+    let first = try await service.fetch(.claude, now: now)
+    let cached = try await service.fetch(.claude, now: now.addingTimeInterval(589))
+    XCTAssertEqual(cached, first)
+    XCTAssertEqual(transport.requests.count, 1)
+    XCTAssertEqual(reader.claudeReads, 1)
+
+    let refreshed = try await service.fetch(.claude, now: now.addingTimeInterval(590))
+    XCTAssertEqual(refreshed.updatedAt, now.addingTimeInterval(590))
+    XCTAssertEqual(transport.requests.count, 2)
+  }
+
+  func testCodexIsNotPacedBetweenSuccessfulRequests() async throws {
+    let transport = StubTransport(
+      result: .success(HTTPResponse(statusCode: 200, data: Data("{}".utf8))))
+    let service = UsageService(credentialReader: StubCredentialReader(), transport: transport)
+    await service.setConsent(true)
+
+    _ = try await service.fetch(.codex, now: now)
+    _ = try await service.fetch(.codex, now: now.addingTimeInterval(1))
+    XCTAssertEqual(transport.requests.count, 2)
+  }
+
+  func testClaudeRateLimitNeverRetriesSoonerThanMinimumBackoff() async {
+    for (header, expectedDelay) in [("60", 600.0), ("1362", 1_362.0), ("999999", 86_400.0)] {
+      let transport = StubTransport(
+        result: .success(HTTPResponse(statusCode: 429, headers: ["retry-after": header])))
+      let service = UsageService(credentialReader: StubCredentialReader(), transport: transport)
+      await service.setConsent(true)
+
+      let retryAt = now.addingTimeInterval(expectedDelay)
+      await assertFetchError(service, .claude, at: now) { error in
+        XCTAssertEqual(error, .rateLimited(.claude, retryAt: retryAt))
+      }
+      await assertFetchError(service, .claude, at: retryAt.addingTimeInterval(-1)) { error in
+        XCTAssertEqual(error, .rateLimited(.claude, retryAt: retryAt))
+      }
+      XCTAssertEqual(transport.requests.count, 1, "Retry-After \(header)")
+    }
+  }
+
+  func testClaudeRateLimitWithoutHeaderBacksOffFromMinimum() async {
+    let transport = StubTransport(result: .success(HTTPResponse(statusCode: 429)))
+    let service = UsageService(credentialReader: StubCredentialReader(), transport: transport)
+    await service.setConsent(true)
+
+    await assertFetchError(service, .claude, at: now) { error in
+      XCTAssertEqual(error, .rateLimited(.claude, retryAt: self.now.addingTimeInterval(600)))
+    }
+    let second = now.addingTimeInterval(600)
+    await assertFetchError(service, .claude, at: second) { error in
+      XCTAssertEqual(error, .rateLimited(.claude, retryAt: second.addingTimeInterval(1_200)))
+    }
+    XCTAssertEqual(transport.requests.count, 2)
+  }
+
+  func testRateLimitCooldownSurvivesServiceRestartAndConsentRevocation() async {
+    let store = InMemoryUsageRequestStore()
+    let firstTransport = StubTransport(
+      result: .success(HTTPResponse(statusCode: 429, headers: ["Retry-After": "1200"])))
+    let first = UsageService(
+      credentialReader: StubCredentialReader(), transport: firstTransport, store: store)
+    await first.setConsent(true)
+    await assertFetchError(first, .claude, at: now) { _ in }
+
+    let secondTransport = StubTransport(
+      result: .success(HTTPResponse(statusCode: 200, data: claudeUsageBody)))
+    let second = UsageService(
+      credentialReader: StubCredentialReader(), transport: secondTransport, store: store)
+    await second.setConsent(true)
+    await second.setConsent(false)
+    await second.setConsent(true)
+    await assertFetchError(second, .claude, at: now.addingTimeInterval(1_199)) { error in
+      XCTAssertEqual(error, .rateLimited(.claude, retryAt: self.now.addingTimeInterval(1_200)))
+    }
+    XCTAssertEqual(secondTransport.requests.count, 0)
+
+    _ = try? await second.fetch(.claude, now: now.addingTimeInterval(1_200))
+    XCTAssertEqual(secondTransport.requests.count, 1)
+    XCTAssertEqual(store.load(.claude)?.blockedUntil, nil)
+    XCTAssertEqual(store.load(.claude)?.rateLimitFailures, 0)
+  }
+
+  func testCachedClaudeUsageSurvivesRestartButNotConsentRevocation() async throws {
+    let store = InMemoryUsageRequestStore()
+    let transport = StubTransport(
+      result: .success(HTTPResponse(statusCode: 200, data: claudeUsageBody)))
+    let first = UsageService(
+      credentialReader: StubCredentialReader(), transport: transport, store: store)
+    await first.setConsent(true)
+    let usage = try await first.fetch(.claude, now: now)
+
+    let second = UsageService(
+      credentialReader: StubCredentialReader(), transport: transport, store: store)
+    await second.setConsent(true)
+    let restored = await second.cachedUsage(for: .claude)
+    XCTAssertEqual(restored, usage)
+    let fetched = try await second.fetch(.claude, now: now.addingTimeInterval(60))
+    XCTAssertEqual(fetched, usage)
+    XCTAssertEqual(transport.requests.count, 1)
+
+    await second.setConsent(false)
+    await second.setConsent(true)
+    let cleared = await second.cachedUsage(for: .claude)
+    XCTAssertNil(cleared)
+    XCTAssertNil(store.load(.claude)?.cachedUsage)
+  }
+
+  func testClaudeFailureSpacesOutRetries() async {
+    let transport = StubTransport(result: .success(HTTPResponse(statusCode: 500)))
+    let service = UsageService(credentialReader: StubCredentialReader(), transport: transport)
+    await service.setConsent(true)
+
+    await assertFetchError(service, .claude, at: now) { error in
+      XCTAssertEqual(error, .serverError(.claude, statusCode: 500))
+    }
+    await assertFetchError(service, .claude, at: now.addingTimeInterval(59)) { error in
+      XCTAssertEqual(error, .requestThrottled(.claude, retryAt: self.now.addingTimeInterval(60)))
+      XCTAssertEqual(error.retryAt, self.now.addingTimeInterval(60))
+    }
+    XCTAssertEqual(transport.requests.count, 1)
+
+    await assertFetchError(service, .claude, at: now.addingTimeInterval(60)) { error in
+      XCTAssertEqual(error, .serverError(.claude, statusCode: 500))
+    }
+    XCTAssertEqual(transport.requests.count, 2)
+  }
+
+  func testUserDefaultsRequestStoreRoundTripsRecord() throws {
+    let suiteName = "AgentMeterTests.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let store = UserDefaultsUsageRequestStore(defaults: defaults)
+    let usage = try ClaudeUsageParser.parse(data: claudeUsageBody, now: now)
+    let record = UsageRequestRecord(
+      cachedUsage: usage,
+      lastFailureAt: now,
+      rateLimitFailures: 2,
+      blockedUntil: now.addingTimeInterval(600))
+
+    store.save(record, for: .claude)
+
+    XCTAssertEqual(UserDefaultsUsageRequestStore(defaults: defaults).load(.claude), record)
+    XCTAssertNil(store.load(.codex))
+  }
+
+  private var claudeUsageBody: Data {
+    Data(
+      """
+      {
+        "five_hour": {"utilization": 25, "resets_at": "2023-11-14T23:13:20Z"},
+        "seven_day": {"utilization": 40, "resets_at": "2023-11-20T00:00:00Z"}
+      }
+      """.utf8)
+  }
+
+  private func assertFetchError(
+    _ service: UsageService,
+    _ provider: Provider,
+    at date: Date,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ check: (UsageFetchError) -> Void
+  ) async {
+    do {
+      _ = try await service.fetch(provider, now: date)
+      XCTFail("fetch must fail", file: file, line: line)
+    } catch let error as UsageFetchError {
+      check(error)
+    } catch {
+      XCTFail("unexpected error: \(error)", file: file, line: line)
     }
   }
 
