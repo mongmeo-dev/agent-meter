@@ -764,6 +764,15 @@ private struct ProviderCard: View {
         Text("사용량 한도 정보 없음")
           .foregroundStyle(.secondary)
       }
+      if let credits = state.usage?.credits {
+        HStack {
+          Text("크레딧 잔량")
+          Spacer()
+          Text(Self.creditText(credits))
+            .monospacedDigit()
+            .fontWeight(.semibold)
+        }
+      }
       if let message = state.message {
         Text(message)
           .font(.caption)
@@ -812,6 +821,14 @@ private struct ProviderCard: View {
 
   private static func percent(_ value: Double) -> String {
     "\(Int(value.rounded()))% 남음"
+  }
+
+  private static func creditText(_ credits: CreditBalance) -> String {
+    if credits.isUnlimited { return "무제한" }
+    if let currencyCode = credits.currencyCode {
+      return credits.remaining.formatted(.currency(code: currencyCode))
+    }
+    return "\(credits.remaining.formatted(.number.precision(.fractionLength(0...2)))) 크레딧"
   }
 
   private static func localDate(_ date: Date) -> String {

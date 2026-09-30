@@ -329,6 +329,76 @@ final class UsageTests: XCTestCase {
     XCTAssertEqual(Set(usage.windows.map(\.id)).count, 2)
   }
 
+  func testCodexCreditsParseBalanceEvenWithoutRateLimit() throws {
+    let data = Data(
+      """
+      {
+        "credits": {"has_credits": true, "unlimited": false, "balance": "12.5"}
+      }
+      """.utf8)
+
+    let usage = try CodexUsageParser.parse(data: data, now: now)
+
+    XCTAssertTrue(usage.windows.isEmpty)
+    XCTAssertEqual(usage.credits, CreditBalance(remaining: 12.5))
+  }
+
+  func testCodexUnlimitedAndMalformedCredits() throws {
+    let unlimited = try CodexUsageParser.parse(
+      data: Data("{\"credits\":{\"unlimited\":true,\"balance\":null}}".utf8), now: now)
+    XCTAssertEqual(unlimited.credits, CreditBalance(remaining: 0, isUnlimited: true))
+
+    let malformed = try CodexUsageParser.parse(
+      data: Data("{\"credits\":{\"balance\":\"abc\"}}".utf8), now: now)
+    XCTAssertNil(malformed.credits)
+  }
+
+  func testClaudeExtraUsageCreditsAreRemainingMonthlyLimitInDollars() throws {
+    let data = Data(
+      """
+      {
+        "five_hour": {"utilization": 10},
+        "extra_usage": {
+          "is_enabled": true,
+          "monthly_limit": 5000,
+          "used_credits": 1234.0,
+          "utilization": 24.68
+        }
+      }
+      """.utf8)
+
+    let usage = try ClaudeUsageParser.parse(data: data, now: now)
+
+    XCTAssertEqual(usage.credits?.currencyCode, "USD")
+    XCTAssertEqual(usage.credits?.remaining ?? -1, 37.66, accuracy: 0.001)
+    XCTAssertEqual(usage.credits?.isUnlimited, false)
+  }
+
+  func testClaudeExtraUsageDisabledOrUnlimited() throws {
+    let disabled = try ClaudeUsageParser.parse(
+      data: Data("{\"extra_usage\":{\"is_enabled\":false,\"monthly_limit\":5000}}".utf8),
+      now: now)
+    XCTAssertNil(disabled.credits)
+
+    let unlimited = try ClaudeUsageParser.parse(
+      data: Data(
+        "{\"extra_usage\":{\"is_enabled\":true,\"monthly_limit\":null,\"used_credits\":10}}".utf8),
+      now: now)
+    XCTAssertEqual(
+      unlimited.credits, CreditBalance(remaining: 0, currencyCode: "USD", isUnlimited: true))
+  }
+
+  func testCachedUsageWithoutCreditsStillDecodes() throws {
+    let data = Data(
+      """
+      {"provider": "codex", "windows": [], "updatedAt": 0}
+      """.utf8)
+
+    let usage = try JSONDecoder().decode(ProviderUsage.self, from: data)
+
+    XCTAssertNil(usage.credits)
+  }
+
   func testMissingLimitsAreUnavailableRatherThanFull() throws {
     let codex = try CodexUsageParser.parse(data: Data("{}".utf8), now: now)
     let claude = try ClaudeUsageParser.parse(

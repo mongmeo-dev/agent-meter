@@ -33,14 +33,35 @@ public struct UsageWindow: Identifiable, Equatable, Codable, Sendable {
 
 }
 
+/// Remaining credit balance. `currencyCode` is nil when the balance is in provider credit
+/// units rather than money (Codex credits).
+public struct CreditBalance: Equatable, Codable, Sendable {
+  public let remaining: Double
+  public let currencyCode: String?
+  public let isUnlimited: Bool
+
+  public init(remaining: Double, currencyCode: String? = nil, isUnlimited: Bool = false) {
+    self.remaining = max(0, remaining)
+    self.currencyCode = currencyCode
+    self.isUnlimited = isUnlimited
+  }
+}
+
 public struct ProviderUsage: Equatable, Codable, Sendable {
   public let provider: Provider
   public let windows: [UsageWindow]
+  public let credits: CreditBalance?
   public let updatedAt: Date
 
-  public init(provider: Provider, windows: [UsageWindow], updatedAt: Date = Date()) {
+  public init(
+    provider: Provider,
+    windows: [UsageWindow],
+    credits: CreditBalance? = nil,
+    updatedAt: Date = Date()
+  ) {
     self.provider = provider
     self.windows = windows
+    self.credits = credits
     self.updatedAt = updatedAt
   }
 }
@@ -432,11 +453,12 @@ public enum CodexUsageParser {
     guard let root = try? JSONSupport.object(from: data) else {
       throw UsageParsingError.invalidSchema(.codex)
     }
+    let credits = parseCredits(root["credits"])
     guard let rawRateLimit = root["rate_limit"] else {
-      return ProviderUsage(provider: .codex, windows: [], updatedAt: now)
+      return ProviderUsage(provider: .codex, windows: [], credits: credits, updatedAt: now)
     }
     if rawRateLimit is NSNull {
-      return ProviderUsage(provider: .codex, windows: [], updatedAt: now)
+      return ProviderUsage(provider: .codex, windows: [], credits: credits, updatedAt: now)
     }
     guard let rateLimit = rawRateLimit as? [String: Any] else {
       throw UsageParsingError.invalidSchema(.codex)
@@ -453,7 +475,21 @@ public enum CodexUsageParser {
     {
       windows.append(secondary)
     }
-    return ProviderUsage(provider: .codex, windows: windows, updatedAt: now)
+    return ProviderUsage(provider: .codex, windows: windows, credits: credits, updatedAt: now)
+  }
+
+  /// Credits are supplementary, so a malformed `credits` object hides the balance instead of
+  /// failing the whole usage response.
+  private static func parseCredits(_ raw: Any?) -> CreditBalance? {
+    guard let object = raw as? [String: Any] else { return nil }
+    if object["unlimited"] as? Bool == true {
+      return CreditBalance(remaining: 0, isUnlimited: true)
+    }
+    let balance =
+      JSONSupport.number(object["balance"])
+      ?? JSONSupport.string(object["balance"]).flatMap(Double.init)
+    guard let balance, balance.isFinite else { return nil }
+    return CreditBalance(remaining: balance)
   }
 
   private static func parseWindow(_ raw: Any?, id: String) throws -> UsageWindow? {
@@ -539,7 +575,26 @@ public enum ClaudeUsageParser {
       windows.append(sevenDay)
     }
     windows.append(contentsOf: try parseFableWindows(root["limits"]))
-    return ProviderUsage(provider: .claude, windows: windows, updatedAt: now)
+    return ProviderUsage(
+      provider: .claude,
+      windows: windows,
+      credits: parseExtraUsageCredits(root["extra_usage"]),
+      updatedAt: now)
+  }
+
+  /// `extra_usage` reports the monthly extra-usage limit and spend in cents; the remaining
+  /// balance is their difference. Malformed or disabled extra usage hides the balance.
+  private static func parseExtraUsageCredits(_ raw: Any?) -> CreditBalance? {
+    guard let object = raw as? [String: Any],
+      object["is_enabled"] as? Bool == true
+    else { return nil }
+    let currencyCode = JSONSupport.string(object["currency"])?.uppercased() ?? "USD"
+    guard let rawLimit = object["monthly_limit"], !(rawLimit is NSNull) else {
+      return CreditBalance(remaining: 0, currencyCode: currencyCode, isUnlimited: true)
+    }
+    guard let limit = JSONSupport.number(rawLimit), limit >= 0 else { return nil }
+    let used = JSONSupport.number(object["used_credits"]) ?? 0
+    return CreditBalance(remaining: (limit - used) / 100, currencyCode: currencyCode)
   }
 
   public static func parseISO8601(_ value: String) -> Date? {
