@@ -10,6 +10,7 @@ struct AgentMeterApp: App {
   private let updaterController: SPUStandardUpdaterController
 
   init() {
+    AMFont.registerBundledFonts()
     updaterController = SPUStandardUpdaterController(
       startingUpdater: true,
       updaterDelegate: nil,
@@ -440,14 +441,7 @@ private enum MenuBarArtwork {
   }
 
   private static func load(named name: String) -> NSImage? {
-    let resources: Bundle?
-    if Bundle.main.bundleURL.pathExtension == "app" {
-      resources = Bundle.main.resourceURL
-        .flatMap { Bundle(url: $0.appendingPathComponent("AgentMeter_AgentMeter.bundle")) }
-    } else {
-      resources = Bundle.module
-    }
-    guard let url = resources?.url(forResource: name, withExtension: "png"),
+    guard let url = AppResources.bundle?.url(forResource: name, withExtension: "png"),
       let image = NSImage(contentsOf: url)
     else {
       return nil
@@ -568,126 +562,211 @@ private enum MenuBarLabelRenderer {
     )
   }
 }
-
 @MainActor
 private struct AgentMeterMenu: View {
   @ObservedObject var model: AgentMeterModel
   let updater: SPUUpdater
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var entered = false
 
   var body: some View {
-    ScrollView(.vertical) {
-      Group {
-        if model.consentGranted {
-          usageContent
-        } else {
-          consentContent
+    VStack(spacing: 0) {
+      header
+      AMHairline()
+      ScrollView(.vertical) {
+        Group {
+          if model.consentGranted {
+            usageContent
+          } else {
+            consentContent
+          }
         }
+        .padding(12)
       }
-      .padding(14)
-      .frame(width: 390, alignment: .leading)
+      .scrollIndicators(.never)
+      AMHairline()
+      footer
     }
-    .frame(width: 390, height: 640)
+    .frame(width: 380, height: 620)
+    .background(AMColor.canvas)
+    .environment(\.colorScheme, .dark)
+    .tint(AMColor.mute)
+    .onAppear { entered = true }
+    .onDisappear { entered = false }
+  }
+
+  private var header: some View {
+    HStack(spacing: 8) {
+      Text("Agent Meter")
+        .font(AMFont.inter(14, .semibold))
+        .foregroundStyle(AMColor.ink)
+      Spacer()
+      if model.consentGranted {
+        Button {
+          model.refreshAll()
+        } label: {
+          if model.isRefreshing {
+            AMSpinner(size: 11)
+          } else {
+            Image(systemName: "arrow.clockwise")
+          }
+        }
+        .buttonStyle(AMIconButtonStyle())
+        .disabled(model.isRefreshing)
+        .help("새로 고침")
+        .accessibilityLabel("새로 고침")
+      }
+    }
+    .padding(.horizontal, 16)
+    .frame(height: 48)
+  }
+
+  private var footer: some View {
+    HStack(spacing: 8) {
+      Text("모든 시간은 이 Mac의 현지 시간")
+        .font(AMFont.inter(11))
+        .foregroundStyle(AMColor.ash)
+      Spacer()
+      Button("종료") {
+        NSApplication.shared.terminate(nil)
+      }
+      .buttonStyle(AMTertiaryButtonStyle())
+    }
+    .padding(.horizontal, 16)
+    .frame(height: 44)
   }
 
   private var consentContent: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      Text("Agent Meter")
-        .font(.headline)
-      Text("사용량을 표시하려면 기존 CLI 인증 정보를 읽고 각 제공자의 usage API에 요청해야 합니다.")
+    VStack(alignment: .leading, spacing: 10) {
+      VStack(alignment: .leading, spacing: 12) {
+        Text("사용량을 표시하려면 기존 CLI 인증 정보를 읽고 각 제공자의 usage API에 요청해야 합니다.")
+          .font(AMFont.inter(13))
+          .foregroundStyle(AMColor.body)
+          .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 8) {
+          consentSource(
+            systemImage: "terminal",
+            title: "Codex",
+            detail: "~/.codex/auth.json (CODEX_HOME 지원)")
+          consentSource(
+            systemImage: "key.fill",
+            title: "Claude",
+            detail: "Claude Code-credentials Keychain 또는 ~/.claude/.credentials.json")
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AMColor.surfaceElevated, in: RoundedRectangle(cornerRadius: AMRadius.md))
+        Text(
+          "토큰은 저장하거나 화면에 표시하지 않습니다. API는 공식 SDK가 아닌 비공식 usage 엔드포인트이며, 형식이나 접근 권한이 바뀌면 값을 표시하지 않습니다."
+        )
+        .font(AMFont.inter(11))
+        .foregroundStyle(AMColor.mute)
         .fixedSize(horizontal: false, vertical: true)
-      VStack(alignment: .leading, spacing: 5) {
-        Label("Codex: ~/.codex/auth.json (CODEX_HOME 지원)", systemImage: "terminal")
-        Label(
-          "Claude: Claude Code-credentials Keychain 또는 ~/.claude/.credentials.json",
-          systemImage: "key.fill")
-      }
-      Text(
-        "토큰은 저장하거나 화면에 표시하지 않습니다. API는 공식 SDK가 아닌 비공식 usage 엔드포인트이며, 형식이나 접근 권한이 바뀌면 값을 표시하지 않습니다."
-      )
-      .font(.caption)
-      .foregroundStyle(.secondary)
-      .fixedSize(horizontal: false, vertical: true)
-      HStack {
         Button("허용하고 시작") {
           model.acceptConsent()
         }
-        .buttonStyle(.borderedProminent)
-        Button("종료") {
-          NSApplication.shared.terminate(nil)
-        }
+        .buttonStyle(AMPrimaryButtonStyle())
       }
-      Button("업데이트 확인…") {
-        updater.checkForUpdates()
+      .amCard()
+      .amEntrance(index: 0, isVisible: entered, reduceMotion: reduceMotion)
+
+      AMDisclosure(title: "업데이트", systemImage: "arrow.down.circle") {
+        updateSettings
       }
-      UpdaterSettingsView(updater: updater)
+      .amCard()
+      .amEntrance(index: 1, isVisible: entered, reduceMotion: reduceMotion)
+    }
+  }
+
+  private func consentSource(systemImage: String, title: String, detail: String) -> some View {
+    HStack(alignment: .firstTextBaseline, spacing: 8) {
+      Image(systemName: systemImage)
+        .font(.system(size: 11))
+        .foregroundStyle(AMColor.mute)
+        .frame(width: 14)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+          .font(AMFont.inter(12, .medium))
+          .foregroundStyle(AMColor.ink)
+        Text(detail)
+          .font(AMFont.inter(11))
+          .foregroundStyle(AMColor.mute)
+          .fixedSize(horizontal: false, vertical: true)
+      }
     }
   }
 
   private var usageContent: some View {
     VStack(alignment: .leading, spacing: 10) {
-      ForEach(Provider.allCases) { provider in
+      ForEach(Array(Provider.allCases.enumerated()), id: \.element) { index, provider in
         if let state = model.states[provider] {
           ProviderCard(state: state)
+            .amEntrance(index: index, isVisible: entered, reduceMotion: reduceMotion)
         }
       }
-      Divider()
-      HStack {
-        Button {
-          model.refreshAll()
-        } label: {
-          Label("새로 고침", systemImage: "arrow.clockwise")
+      AMDisclosure(title: "설정", systemImage: "gearshape") {
+        settingsContent
+      }
+      .amCard()
+      .amEntrance(
+        index: Provider.allCases.count, isVisible: entered, reduceMotion: reduceMotion)
+    }
+  }
+
+  private var settingsContent: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      AMSettingRow(title: "자동 새로 고침") {
+        Picker(
+          "자동 새로 고침",
+          selection: Binding(
+            get: { model.refreshInterval },
+            set: { model.setRefreshInterval($0) }
+          )
+        ) {
+          ForEach(RefreshInterval.allCases) { interval in
+            Text(interval.label).tag(interval)
+          }
         }
-        .disabled(model.isRefreshing)
-        Spacer()
-        Button("종료") {
-          NSApplication.shared.terminate(nil)
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .fixedSize()
+      }
+      AMHairline()
+      updateSettings
+      AMHairline()
+      AMDisclosure(title: "상단바 표시") {
+        VStack(alignment: .leading, spacing: 14) {
+          ForEach(Provider.allCases) { provider in
+            MenuBarProviderSettingsRow(provider: provider, model: model)
+          }
+          Text("이름은 최대 20자이며 공백과 제어 문자는 정리됩니다.")
+            .font(AMFont.inter(11))
+            .foregroundStyle(AMColor.ash)
         }
       }
-      Button("업데이트 확인…") {
-        updater.checkForUpdates()
-      }
-      UpdaterSettingsView(updater: updater)
-      Picker(
-        "자동 새로 고침",
-        selection: Binding(
-          get: { model.refreshInterval },
-          set: { model.setRefreshInterval($0) }
-        )
-      ) {
-        ForEach(RefreshInterval.allCases) { interval in
-          Text(interval.label).tag(interval)
-        }
-      }
-      .pickerStyle(.menu)
-      menuBarAppearanceSettings
-      Text("모든 시간은 이 Mac의 현지 시간")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      AMHairline()
       Text(
         "Codex: chatgpt.com/backend-api/wham/usage · Claude: api.anthropic.com/api/oauth/usage (비공식 API)"
       )
-      .font(.caption2)
-      .foregroundStyle(.secondary)
+      .font(AMFont.inter(11))
+      .foregroundStyle(AMColor.ash)
       .fixedSize(horizontal: false, vertical: true)
       Button("인증 정보 읽기 동의 철회") {
         model.revokeConsent()
       }
-      .font(.caption)
-      .buttonStyle(.link)
+      .buttonStyle(.plain)
+      .font(AMFont.inter(11, .medium))
+      .foregroundStyle(AMColor.mute)
     }
   }
 
-  private var menuBarAppearanceSettings: some View {
-    DisclosureGroup("상단바 표시 설정") {
-      VStack(alignment: .leading, spacing: 8) {
-        ForEach(Provider.allCases) { provider in
-          MenuBarProviderSettingsRow(provider: provider, model: model)
-        }
-        Text("이름은 최대 20자이며 공백과 제어 문자는 정리됩니다.")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
+  private var updateSettings: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      UpdaterSettingsView(updater: updater)
+      Button("업데이트 확인…") {
+        updater.checkForUpdates()
       }
-      .padding(.top, 4)
+      .buttonStyle(AMTertiaryButtonStyle())
     }
   }
 }
@@ -709,16 +788,26 @@ private struct UpdaterSettingsView: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
-      Toggle("업데이트 자동 확인", isOn: $automaticallyChecksForUpdates)
-        .onChange(of: automaticallyChecksForUpdates) { _, enabled in
-          updater.automaticallyChecksForUpdates = enabled
-        }
-      Toggle("업데이트 자동 다운로드 및 설치", isOn: $automaticallyDownloadsUpdates)
-        .disabled(!automaticallyChecksForUpdates)
-        .onChange(of: automaticallyDownloadsUpdates) { _, enabled in
-          updater.automaticallyDownloadsUpdates = enabled
-        }
+    VStack(alignment: .leading, spacing: 8) {
+      AMSettingRow(title: "업데이트 자동 확인") {
+        Toggle("업데이트 자동 확인", isOn: $automaticallyChecksForUpdates)
+          .labelsHidden()
+          .toggleStyle(.switch)
+          .controlSize(.mini)
+          .onChange(of: automaticallyChecksForUpdates) { _, enabled in
+            updater.automaticallyChecksForUpdates = enabled
+          }
+      }
+      AMSettingRow(title: "업데이트 자동 다운로드 및 설치") {
+        Toggle("업데이트 자동 다운로드 및 설치", isOn: $automaticallyDownloadsUpdates)
+          .labelsHidden()
+          .toggleStyle(.switch)
+          .controlSize(.mini)
+          .disabled(!automaticallyChecksForUpdates)
+          .onChange(of: automaticallyDownloadsUpdates) { _, enabled in
+            updater.automaticallyDownloadsUpdates = enabled
+          }
+      }
     }
   }
 }
@@ -728,111 +817,132 @@ private struct ProviderCard: View {
   let state: ProviderState
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack {
+    VStack(alignment: .leading, spacing: 14) {
+      HStack(spacing: 8) {
+        providerIcon
         Text(state.provider.displayName)
-          .font(.headline)
+          .font(AMFont.inter(14, .medium))
+          .foregroundStyle(AMColor.ink)
         Spacer()
-        phaseView
+        AMStatusPill(phase: state.phase)
       }
       if let usage = state.usage, !usage.windows.isEmpty {
-        ForEach(usage.windows) { window in
-          VStack(alignment: .leading, spacing: 4) {
-            HStack {
-              Text(window.title)
-              Spacer()
-              Text(Self.percent(window.remainingPercent))
-                .monospacedDigit()
-                .fontWeight(.semibold)
-            }
-            ProgressView(value: window.remainingPercent, total: 100)
-            if let resetAt = window.resetAt {
-              Text("초기화: \(Self.localDate(resetAt))")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            } else {
-              Text("초기화 시간 정보 없음")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
+        VStack(alignment: .leading, spacing: 14) {
+          ForEach(usage.windows) { window in
+            UsageWindowRow(window: window)
           }
         }
       } else if state.phase == .loading {
-        Text("사용량을 확인하는 중…")
-          .foregroundStyle(.secondary)
+        placeholder("사용량을 확인하는 중…")
       } else if state.phase == .unavailable {
-        Text("사용량 한도 정보 없음")
-          .foregroundStyle(.secondary)
+        placeholder("사용량 한도 정보 없음")
       }
       if let credits = state.usage?.credits {
-        HStack {
-          Text("크레딧 잔량")
-          Spacer()
-          Text(Self.creditText(credits))
-            .monospacedDigit()
-            .fontWeight(.semibold)
+        VStack(spacing: 10) {
+          AMHairline()
+          HStack(alignment: .firstTextBaseline) {
+            Text("크레딧 잔량")
+              .font(AMFont.inter(13))
+              .foregroundStyle(AMColor.body)
+            Spacer()
+            Text(Self.creditText(credits))
+              .font(AMFont.inter(13, .semibold))
+              .monospacedDigit()
+              .foregroundStyle(AMColor.ink)
+          }
         }
       }
       if let message = state.message {
-        Text(message)
-          .font(.caption)
-          .foregroundStyle(.red)
-          .fixedSize(horizontal: false, vertical: true)
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+          Image(systemName: "exclamationmark.circle.fill")
+            .font(.system(size: 11))
+            .foregroundStyle(state.phase == .failed ? AMColor.accentRed : AMColor.mute)
+          Text(message)
+            .font(AMFont.inter(11))
+            .foregroundStyle(AMColor.body)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(AMColor.surfaceElevated, in: RoundedRectangle(cornerRadius: AMRadius.sm))
       }
-      if let lastSuccessfulUpdate = state.lastSuccessfulUpdate {
-        Text("마지막 성공: \(Self.localDate(lastSuccessfulUpdate))")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-      }
-      if let retryAt = state.retryAt {
-        Text("다음 시도 가능: \(Self.localDate(retryAt))")
-          .font(.caption2)
-          .foregroundStyle(.orange)
+      if state.lastSuccessfulUpdate != nil || state.retryAt != nil {
+        HStack(spacing: 10) {
+          if let lastSuccessfulUpdate = state.lastSuccessfulUpdate {
+            Text("마지막 성공 \(Self.localDate(lastSuccessfulUpdate))")
+          }
+          if let retryAt = state.retryAt {
+            Text("다음 시도 \(Self.localDate(retryAt))")
+          }
+        }
+        .font(AMFont.inter(11))
+        .foregroundStyle(AMColor.ash)
       }
     }
-    .padding(10)
-    .background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+    .amCard()
   }
 
   @ViewBuilder
-  private var phaseView: some View {
-    switch state.phase {
-    case .loading:
-      ProgressView()
-        .controlSize(.small)
-    case .ready:
-      Text("정상")
-        .font(.caption)
-        .foregroundStyle(.green)
-    case .unavailable:
-      Text("정보 없음")
-        .font(.caption)
-        .foregroundStyle(.secondary)
-    case .failed:
-      Text("오류")
-        .font(.caption)
-        .foregroundStyle(.red)
-    case .awaitingConsent:
-      Text("동의 필요")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+  private var providerIcon: some View {
+    if let icon = MenuBarArtwork.icon(for: state.provider) {
+      Image(nsImage: icon)
+        .resizable()
+        .interpolation(.high)
+        .frame(width: 16, height: 16)
+        .padding(3)
+        .background(AMColor.surfaceCard, in: RoundedRectangle(cornerRadius: AMRadius.sm))
+        .overlay(
+          RoundedRectangle(cornerRadius: AMRadius.sm)
+            .strokeBorder(AMColor.hairline, lineWidth: 1))
+        .accessibilityHidden(true)
     }
   }
 
-  private static func percent(_ value: Double) -> String {
-    "\(Int(value.rounded()))% 남음"
+  private func placeholder(_ text: String) -> some View {
+    Text(text)
+      .font(AMFont.inter(12))
+      .foregroundStyle(AMColor.mute)
   }
 
   private static func creditText(_ credits: CreditBalance) -> String {
     if credits.isUnlimited { return "무제한" }
     if let currencyCode = credits.currencyCode {
-      return credits.remaining.formatted(.currency(code: currencyCode))
+      return credits.remaining.formatted(.currency(code: currencyCode).presentation(.narrow))
     }
     return "\(credits.remaining.formatted(.number.precision(.fractionLength(0...2)))) 크레딧"
   }
 
-  private static func localDate(_ date: Date) -> String {
+  fileprivate static func localDate(_ date: Date) -> String {
     date.formatted(date: .abbreviated, time: .shortened)
+  }
+}
+
+@MainActor
+private struct UsageWindowRow: View {
+  let window: UsageWindow
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      HStack(alignment: .firstTextBaseline, spacing: 4) {
+        Text(window.title)
+          .font(AMFont.inter(13))
+          .foregroundStyle(AMColor.body)
+        Spacer()
+        AMCountingPercent(value: window.remainingPercent)
+        Text("남음")
+          .font(AMFont.inter(11))
+          .foregroundStyle(AMColor.mute)
+      }
+      AMMeterBar(value: window.remainingPercent, level: window.level)
+      Text(
+        window.resetAt.map { "초기화 \(ProviderCard.localDate($0))" } ?? "초기화 시간 정보 없음"
+      )
+      .font(AMFont.inter(11))
+      .foregroundStyle(AMColor.ash)
+    }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(window.title)
+    .accessibilityValue("\(Int(window.remainingPercent.rounded()))% 남음")
   }
 }
 
@@ -842,11 +952,11 @@ private struct MenuBarProviderSettingsRow: View {
   @ObservedObject var model: AgentMeterModel
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 6) {
+    VStack(alignment: .leading, spacing: 8) {
       HStack {
         Text(provider.displayName)
-          .font(.subheadline)
-          .fontWeight(.semibold)
+          .font(AMFont.inter(12, .semibold))
+          .foregroundStyle(AMColor.ink)
         Spacer()
         Picker(
           "표시 방식",
@@ -860,6 +970,7 @@ private struct MenuBarProviderSettingsRow: View {
         }
         .labelsHidden()
         .pickerStyle(.segmented)
+        .controlSize(.small)
         .frame(width: 124)
       }
       let settings = model.menuBarAppearance.settings(for: provider)
@@ -871,16 +982,16 @@ private struct MenuBarProviderSettingsRow: View {
             set: { model.setMenuBarCustomLabel($0, for: provider) }
           )
         )
-        .textFieldStyle(.roundedBorder)
+        .textFieldStyle(AMTextFieldStyle())
       } else {
         Text("제공자 공식 아이콘")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+          .font(AMFont.inter(11))
+          .foregroundStyle(AMColor.ash)
       }
-      Divider()
       Text("표시할 사용량")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+        .font(AMFont.inter(11, .medium))
+        .foregroundStyle(AMColor.mute)
+        .padding(.top, 2)
       if let usage = model.states[provider]?.usage, !usage.windows.isEmpty {
         ForEach(usage.windows) { window in
           MenuBarWindowSettingsRow(
@@ -891,10 +1002,12 @@ private struct MenuBarProviderSettingsRow: View {
         }
       } else {
         Text("사용량 한도 목록을 불러오면 선택할 수 있습니다.")
-          .font(.caption2)
-          .foregroundStyle(.secondary)
+          .font(AMFont.inter(11))
+          .foregroundStyle(AMColor.ash)
       }
     }
+    .padding(10)
+    .background(AMColor.surfaceElevated, in: RoundedRectangle(cornerRadius: AMRadius.md))
   }
 
 }
@@ -906,7 +1019,7 @@ private struct MenuBarWindowSettingsRow: View {
   @ObservedObject var model: AgentMeterModel
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
+    VStack(alignment: .leading, spacing: 6) {
       HStack(spacing: 8) {
         Toggle(
           isOn: Binding(
@@ -921,8 +1034,12 @@ private struct MenuBarWindowSettingsRow: View {
           )
         ) {
           Text(window.title)
+            .font(AMFont.inter(12))
+            .foregroundStyle(AMColor.body)
             .lineLimit(1)
         }
+        .toggleStyle(.checkbox)
+        Spacer(minLength: 4)
         Picker(
           "라벨",
           selection: Binding(
@@ -942,6 +1059,8 @@ private struct MenuBarWindowSettingsRow: View {
         }
         .labelsHidden()
         .pickerStyle(.menu)
+        .controlSize(.small)
+        .fixedSize()
       }
       if model.menuBarWindowLabelMode(for: window.id, provider: provider) == .custom {
         TextField(
@@ -957,7 +1076,7 @@ private struct MenuBarWindowSettingsRow: View {
             }
           )
         )
-        .textFieldStyle(.roundedBorder)
+        .textFieldStyle(AMTextFieldStyle())
       }
     }
   }
