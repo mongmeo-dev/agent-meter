@@ -346,7 +346,7 @@ private final class AgentMeterModel: ObservableObject {
           state.retryAt = nil
           if usage.windows.isEmpty {
             state.phase = .unavailable
-            state.message = "이 제공자는 현재 사용량 한도를 보고하지 않았습니다."
+            state.message = "이 제공자는 현재 사용량 한도를 알려 주지 않습니다."
           } else {
             state.phase = .ready
             state.message = nil
@@ -639,7 +639,7 @@ private struct AgentMeterMenu: View {
   private var consentContent: some View {
     VStack(alignment: .leading, spacing: 10) {
       VStack(alignment: .leading, spacing: 12) {
-        Text("사용량을 표시하려면 기존 CLI 인증 정보를 읽고 각 제공자의 usage API에 요청해야 합니다.")
+        Text("사용량을 표시하려면 이 앱이 기존 CLI 인증 정보를 읽어 각 제공자의 usage API에 요청해야 합니다.")
           .font(AMFont.inter(13))
           .foregroundStyle(AMColor.body)
           .fixedSize(horizontal: false, vertical: true)
@@ -657,7 +657,7 @@ private struct AgentMeterMenu: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(AMColor.surfaceElevated, in: RoundedRectangle(cornerRadius: AMRadius.md))
         Text(
-          "토큰은 저장하거나 화면에 표시하지 않습니다. API는 공식 SDK가 아닌 비공식 usage 엔드포인트이며, 형식이나 접근 권한이 바뀌면 값을 표시하지 않습니다."
+          "토큰은 저장하거나 화면에 표시하지 않습니다. API는 공식 SDK가 아닌 비공식 usage 엔드포인트입니다. 형식이나 접근 권한이 바뀌면 값을 표시하지 않습니다."
         )
         .font(AMFont.inter(11))
         .foregroundStyle(AMColor.mute)

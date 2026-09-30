@@ -155,13 +155,13 @@ public enum CredentialError: Error, LocalizedError, Equatable, Sendable {
     case .missing(.claude):
       "Claude 인증 정보를 찾을 수 없습니다. 터미널에서 `claude`를 실행해 로그인한 뒤 새로 고침하세요."
     case .invalid(.codex):
-      "Codex 인증 파일 형식을 읽을 수 없습니다. `codex login`을 다시 실행한 뒤 새로 고침하세요."
+      "Codex 인증 파일의 형식을 알 수 없습니다. `codex login`을 다시 실행한 뒤 새로 고침하세요."
     case .invalid(.claude):
-      "Claude 인증 정보 형식을 읽을 수 없습니다. `claude logout && claude login` 후 새로 고침하세요."
+      "Claude 인증 정보의 형식을 알 수 없습니다. `claude logout && claude login`을 실행한 뒤 새로 고침하세요."
     case .expired(.codex):
       "Codex 인증이 만료되었습니다. 터미널에서 `codex login`을 실행한 뒤 새로 고침하세요."
     case .expired(.claude):
-      "Claude 인증이 만료되었습니다. 터미널에서 `claude logout && claude login` 후 새로 고침하세요."
+      "Claude 인증이 만료되었습니다. 터미널에서 `claude logout && claude login`을 실행한 뒤 새로 고침하세요."
     case .keychainUnavailable:
       "Claude Code Keychain 항목에 접근할 수 없습니다. 터미널에서 `claude`를 실행해 로그인하고 Keychain 접근을 허용하세요."
     }
@@ -221,7 +221,7 @@ public enum UsageFetchError: Error, LocalizedError, Equatable, Sendable {
   public var userMessage: String {
     switch self {
     case .consentRequired:
-      "먼저 인증 정보 및 네트워크 접근을 허용해야 합니다."
+      "먼저 인증 정보와 네트워크 접근을 허용해야 합니다."
     case .missingCredentials(let provider):
       CredentialError.missing(provider).localizedDescription
     case .invalidCredentials(let provider):
@@ -231,9 +231,9 @@ public enum UsageFetchError: Error, LocalizedError, Equatable, Sendable {
     case .keychainUnavailable:
       CredentialError.keychainUnavailable.localizedDescription
     case .unauthorized(.codex):
-      "Codex 사용량 API 인증이 거부되었습니다. `codex login` 후 새로 고침하세요."
+      "Codex 사용량 API 인증이 거부되었습니다. `codex login`을 실행한 뒤 새로 고침하세요."
     case .unauthorized(.claude):
-      "Claude 사용량 API 인증이 거부되었습니다. `claude logout && claude login` 후 새로 고침하세요."
+      "Claude 사용량 API 인증이 거부되었습니다. `claude logout && claude login`을 실행한 뒤 새로 고침하세요."
     case .forbidden(let provider):
       "\(provider.displayName) 사용량 API 접근 권한이 없습니다. CLI 로그인 상태와 계정 권한을 확인하세요."
     case .rateLimited(let provider, let retryAt):
@@ -243,7 +243,7 @@ public enum UsageFetchError: Error, LocalizedError, Equatable, Sendable {
         "\(provider.displayName) API 요청이 제한되었습니다. 지정된 대기 시간이 지나면 다시 시도하세요."
       }
     case .requestThrottled(let provider, _):
-      "\(provider.displayName) API 호출 한도를 지키기 위해 직전 실패 후 요청을 잠시 보류했습니다."
+      "직전 실패 이후 \(provider.displayName) API 호출 한도를 지키려고 요청을 잠시 보류했습니다."
     case .serverError(let provider, let statusCode):
       "\(provider.displayName) 서버 오류(HTTP \(statusCode))입니다. 잠시 후 다시 시도하세요."
     case .invalidResponse(let provider):
