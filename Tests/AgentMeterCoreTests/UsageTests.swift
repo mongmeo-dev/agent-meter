@@ -329,6 +329,17 @@ final class UsageTests: XCTestCase {
     XCTAssertEqual(Set(usage.windows.map(\.id)).count, 2)
   }
 
+  func testRemainingLevelThresholds() {
+    XCTAssertEqual(RemainingLevel(remainingPercent: 100), .normal)
+    XCTAssertEqual(RemainingLevel(remainingPercent: 25.1), .normal)
+    XCTAssertEqual(RemainingLevel(remainingPercent: 25), .low)
+    XCTAssertEqual(RemainingLevel(remainingPercent: 10.1), .low)
+    XCTAssertEqual(RemainingLevel(remainingPercent: 10), .critical)
+    XCTAssertEqual(RemainingLevel(remainingPercent: 0), .critical)
+    XCTAssertEqual(
+      UsageWindow(id: "w", title: "t", remainingPercent: 5, resetAt: nil).level, .critical)
+  }
+
   func testCodexCreditsParseBalanceEvenWithoutRateLimit() throws {
     let data = Data(
       """

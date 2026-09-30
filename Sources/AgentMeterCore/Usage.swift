@@ -31,6 +31,27 @@ public struct UsageWindow: Identifiable, Equatable, Codable, Sendable {
     self.resetAt = resetAt
   }
 
+  public var level: RemainingLevel { RemainingLevel(remainingPercent: remainingPercent) }
+}
+
+/// How close a window is to running out; the popover tints meters that are low or critical.
+public enum RemainingLevel: Equatable, Sendable {
+  case normal
+  case low
+  case critical
+
+  public static let lowThreshold: Double = 25
+  public static let criticalThreshold: Double = 10
+
+  public init(remainingPercent: Double) {
+    if remainingPercent <= Self.criticalThreshold {
+      self = .critical
+    } else if remainingPercent <= Self.lowThreshold {
+      self = .low
+    } else {
+      self = .normal
+    }
+  }
 }
 
 /// Remaining credit balance. `currencyCode` is nil when the balance is in provider credit
