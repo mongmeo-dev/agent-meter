@@ -1,9 +1,5 @@
 import Foundation
 
-#if canImport(Security)
-  import Security
-#endif
-
 public enum Provider: String, CaseIterable, Identifiable, Codable, Sendable {
   case codex
   case claude
@@ -349,7 +345,7 @@ public struct LocalCredentialReader: CredentialReader, Sendable {
 
   public func readClaudeCredentials() throws -> ClaudeCredentials {
     var keychainUnavailable = false
-    #if canImport(Security)
+    #if os(macOS)
       do {
         let data = try Self.readClaudeKeychainData()
         if let credentials = try? Self.parseClaudeCredentials(data: data) {
@@ -431,25 +427,59 @@ public struct LocalCredentialReader: CredentialReader, Sendable {
     return JSONSupport.dateValue(claims["exp"])
   }
 
-  #if canImport(Security)
+  #if os(macOS)
+    /// Claude Code writes this item with `/usr/bin/security`, and each token refresh resets the
+    /// item's partition list to `apple-tool:`. Reading it directly with SecItemCopyMatching would
+    /// prompt again after every refresh even when "Always Allow" was chosen, so read it through
+    /// the same tool that the item already trusts.
     private static func readClaudeKeychainData() throws -> Data {
-      let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "Claude Code-credentials",
-        kSecReturnData as String: true,
-        kSecMatchLimit as String: kSecMatchLimitOne,
-      ]
-      var result: CFTypeRef?
-      let status = SecItemCopyMatching(query as CFDictionary, &result)
-      switch status {
-      case errSecSuccess:
-        guard let data = result as? Data else { throw KeychainReadError.malformed }
-        return data
-      case errSecItemNotFound:
+      let process = Process()
+      process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+      process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+      let output = Pipe()
+      process.standardOutput = output
+      process.standardError = FileHandle.nullDevice
+      do {
+        try process.run()
+      } catch {
+        throw KeychainReadError.unavailable
+      }
+      let timeout = DispatchWorkItem { process.terminate() }
+      DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: timeout)
+      let data = output.fileHandleForReading.readDataToEndOfFile()
+      process.waitUntilExit()
+      timeout.cancel()
+
+      switch process.terminationStatus {
+      case 0:
+        break
+      case 44:  // errSecItemNotFound
         throw KeychainReadError.notFound
       default:
         throw KeychainReadError.unavailable
       }
+      guard
+        let text = String(data: data, encoding: .utf8)?
+          .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
+      else {
+        throw KeychainReadError.malformed
+      }
+      // `security -w` prints the secret as hex when it contains non-printable bytes.
+      if !text.hasPrefix("{"), let decoded = hexData(text) { return decoded }
+      return Data(text.utf8)
+    }
+
+    private static func hexData(_ text: String) -> Data? {
+      guard text.count.isMultiple(of: 2) else { return nil }
+      var data = Data(capacity: text.count / 2)
+      var index = text.startIndex
+      while index < text.endIndex {
+        let next = text.index(index, offsetBy: 2)
+        guard let byte = UInt8(text[index..<next], radix: 16) else { return nil }
+        data.append(byte)
+        index = next
+      }
+      return data
     }
   #endif
 }
